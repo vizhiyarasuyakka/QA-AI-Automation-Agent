@@ -1,0 +1,424 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Release {
+  id          String          @id @default(cuid())
+  name        String
+  docsChangedAt DateTime? // last time a document was removed; uploads carry their own time
+  status      String          @default("Active") // Active, Signed off, Released, Closed
+  createdAt   DateTime        @default(now())
+  stories     Story[]
+  builds      Build[]
+  bugs        Bug[]
+  runs        AutomationRun[]
+  escapes     Escape[]
+  stages      StageStatus[]
+  signoff     Signoff?
+  documents   Document[]
+  jobs        GenerationJob[]
+  findings    PrdFinding[]
+  scripts     AutomationScript[]
+  prototypes  Prototype[]
+  triggers    UiTrigger[]
+  candidates  BugCandidate[]
+  reports     ReportPush[]
+}
+
+model Prototype {
+  id        String      @id @default(cuid())
+  releaseId String
+  release   Release     @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  module    String      @default("")
+  screen    String
+  fileName  String
+  mimeType  String
+  bytes     Bytes
+  sizeBytes Int         @default(0)
+  createdAt DateTime    @default(now())
+  pagePath     String   @default("") // where this screen lives on the build
+  matchResult  String   @default("Not run") // Not run, Match, Mismatch, Blocked
+  matchSummary String   @default("")
+  matchDiffs   String   @default("[]") // JSON [{element, kind, prototype, build}]
+  matchBuild   String   @default("")
+  matchShot    Bytes?
+  matchProtoShot Bytes? // an HTML or SVG prototype as Chrome drew it
+  matchDiffShot  Bytes? // the changed pixels in red, from pixelmatch
+  matchAt      DateTime?
+  triggers  UiTrigger[]
+}
+
+model UiTrigger {
+  id          String     @id @default(cuid())
+  releaseId   String
+  release     Release    @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  prototypeId String?
+  prototype   Prototype? @relation(fields: [prototypeId], references: [id], onDelete: SetNull)
+  module      String     @default("")
+  screen      String
+  element     String // the control the user acts on, by its visible name
+  action      String // the exact action that fires it
+  expected    String     @default("") // what the prototype shows should happen
+  result      String     @default("Not run") // Not run, Pass, Fail, Blocked
+  actual      String     @default("")
+  buildNo     String     @default("")
+  screenshot  Bytes?
+  runAt       DateTime?
+  createdAt   DateTime   @default(now())
+
+  @@unique([releaseId, screen, element, action])
+}
+
+/// A failure waiting for a person to confirm it. It becomes a Bug, and reaches the connector, only when logged.
+model BugCandidate {
+  id           String   @id @default(cuid())
+  releaseId    String
+  release      Release  @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  refKey       String // exec:<id> or trigger:<id>, so a failure is drafted once
+  source       String // execution, ui
+  module       String
+  title        String
+  severity     String   @default("Medium")
+  buildNo      String   @default("")
+  storyRefId   String?
+  testCaseRefId String?
+  precondition String   @default("")
+  steps        String   @default("")
+  testData     String   @default("")
+  expected     String   @default("")
+  actual       String   @default("")
+  evidenceUrl  String   @default("")
+  status       String   @default("Pending") // Pending, Logged, Dismissed
+  bugRefId     String?
+  createdAt    DateTime @default(now())
+
+  @@unique([releaseId, refKey])
+}
+
+model ReportPush {
+  id        String   @id @default(cuid())
+  releaseId String
+  release   Release  @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  buildNo   String
+  total     Int
+  passed    Int
+  failed    Int
+  blocked   Int
+  notRun    Int
+  status    String // sent, failed
+  response  String   @default("")
+  sentAt    DateTime @default(now())
+}
+
+model PrdFinding {
+  id         String   @id @default(cuid())
+  releaseId  String
+  release    Release  @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  severity   String // Blocker, Major, Minor
+  category   String   @default("")
+  module     String   @default("")
+  storyId    String   @default("")
+  document   String   @default("")
+  issue      String
+  question   String   @default("")
+  status     String   @default("Open") // Open, Answered, Waived
+  resolution String   @default("") // the PM's answer or the waiver reason; generation reads answers
+  createdAt  DateTime @default(now())
+}
+
+model ExportTemplate {
+  id         String   @id @default(cuid())
+  name       String
+  fileName   String
+  format     String // xlsx, csv
+  bytes      Bytes
+  sheetName  String   @default("")
+  headerRow  Int      @default(1)
+  columns    String   @default("[]") // JSON [{header, field}]; field "" leaves the column blank
+  createdAt  DateTime @default(now())
+}
+
+model AutomationScript {
+  id          String   @id @default(cuid())
+  releaseId   String
+  release     Release  @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  storyRefId  String
+  story       Story    @relation(fields: [storyRefId], references: [id], onDelete: Cascade)
+  part        Int      @default(1)
+  fileName    String
+  code        String
+  tcIds       String   @default("")
+  status      String   @default("Ready") // Ready, Syntax error, Unchecked
+  error       String   @default("")
+  engine      String   @default("")
+  edited      Boolean  @default(false)
+  generatedAt DateTime @default(now())
+
+  @@unique([storyRefId, part])
+}
+
+model Document {
+  id         String   @id @default(cuid())
+  releaseId  String
+  release    Release  @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  fileName   String
+  docType    String   @default("PRD") // PRD, User stories, Field document, Prototype notes, Other
+  module     String   @default("") // blank = applies to the whole release
+  sizeBytes  Int      @default(0)
+  text       String   @default("") // text extracted at upload; this is what generation reads
+  status     String   @default("Ready") // Ready, Failed
+  error      String   @default("")
+  uploadedAt DateTime @default(now())
+
+  @@unique([releaseId, fileName, module])
+}
+
+model GenerationJob {
+  id           String    @id @default(cuid())
+  releaseId    String
+  release      Release   @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  storyRefId   String? // set when one story was triggered; null = whole release
+  kind         String    @default("testcases") // prd, testcases, playwright, chrome, criteria, ui-extract, ui-run, ui-match
+  engine       String    @default("")
+  status       String    @default("Running") // Running, Done, Failed
+  phase        String    @default("")
+  storiesTotal Int       @default(0)
+  storiesDone  Int       @default(0)
+  casesAdded   Int       @default(0)
+  gapsLeft     Int       @default(0)
+  log          String    @default("")
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+}
+
+model Story {
+  id                 String     @id @default(cuid())
+  releaseId          String
+  release            Release    @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  storyId            String // e.g. VR-203
+  title              String
+  module             String
+  sourceFile         String     @default("") // the user stories file it was listed from; blank = added by hand
+  userStory          String     @default("")
+  acceptanceCriteria String     @default("")
+  fieldDoc           String     @default("")
+  prototypeNotes     String     @default("")
+  clarificationLog   String     @default("") // open questions, assumptions, out of scope
+  intakeDone         Boolean    @default(false) // Gate 1 signed by QA
+  reviewDone         Boolean    @default(false) // Gate 2 signed by QA
+  createdAt          DateTime   @default(now())
+  testCases          TestCase[]
+  coverage           CoverageRow[]
+  bugs               Bug[]
+  scripts            AutomationScript[]
+  testData           TestDataRow[]
+  criteriaResults    CriterionResult[]
+
+  @@unique([releaseId, storyId])
+}
+
+model TestCase {
+  id           String      @id @default(cuid())
+  storyId      String
+  story        Story       @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  tcId         String // INV-VR-203-001
+  module       String
+  title        String
+  type         String // Positive, Negative, Boundary, Validation, Navigation
+  priority     String // P1, P2, P3
+  precondition String      @default("")
+  steps        String      @default("")
+  testData     String      @default("")
+  expected     String      @default("")
+  reviewed     Boolean     @default(false)
+  approved     Boolean     @default(false)
+  smoke        Boolean     @default(false)
+  regression   Boolean     @default(false)
+  automated    Boolean     @default(false)
+  source       String      @default("manual") // manual, ai, import
+  criteria     String      @default("") // acceptance criteria covered, e.g. AC1,AC3
+  covers       String      @default("[]") // JSON [{field, aspect}] of field rules this case exercises
+  sourceRef    String      @default("") // where in the documents this case comes from
+  createdAt    DateTime    @default(now())
+  executions   Execution[]
+  bugs         Bug[]
+
+  @@unique([storyId, tcId])
+}
+
+/// The story's test data sheet: exact values to enter, each with the reason it exists.
+model TestDataRow {
+  id      String @id @default(cuid())
+  storyId String
+  story   Story  @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  field   String
+  kind    String // Valid, Invalid, Boundary, Empty
+  value   String @default("")
+  purpose String @default("")
+  tcIds   String @default("")
+}
+
+model CoverageRow {
+  id        String @id @default(cuid())
+  storyId   String
+  story     Story  @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  field     String
+  mandatory String @default("")
+  minMax    String @default("")
+  format    String @default("")
+  defaultV  String @default("")
+  dropdown  String @default("")
+  tcIds     String @default("")
+}
+
+model Build {
+  id         String      @id @default(cuid())
+  releaseId  String
+  release    Release     @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  number     String // 1.24.3
+  envUrl     String      @default("")
+  loginUser     String   @default("") // the test account Claude signs in with in step 4
+  loginPassword String   @default("") // kept on this machine only and never shown again
+  healthOk   Boolean     @default(false) // Gate 3
+  seedLoaded Boolean     @default(false) // Gate 3
+  notes      String      @default("")
+  deployedAt DateTime    @default(now())
+  executions Execution[]
+  criteria   CriterionResult[]
+
+  @@unique([releaseId, number])
+}
+
+/// Step 4 checks a story's acceptance criteria directly, the positive way, with no test cases. One row per criterion on the URL to test.
+model CriterionResult {
+  id         String   @id @default(cuid())
+  buildId    String
+  build      Build    @relation(fields: [buildId], references: [id], onDelete: Cascade)
+  storyId    String
+  story      Story    @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  criterion  String // AC1
+  text       String   @default("") // the criterion as it read when it was checked
+  result     String // Pass, Fail, Blocked
+  actual     String   @default("")
+  executedBy String   @default("AI") // AI, Human
+  runAt      DateTime @default(now())
+
+  @@unique([buildId, storyId, criterion])
+}
+
+model Execution {
+  id            String   @id @default(cuid())
+  buildId       String
+  build         Build    @relation(fields: [buildId], references: [id], onDelete: Cascade)
+  testCaseId    String
+  testCase      TestCase @relation(fields: [testCaseId], references: [id], onDelete: Cascade)
+  lane          String   @default("UI") // UI, API, Risk, Exploratory, NFR
+  result        String   @default("Not run") // Pass, Fail, Blocked, Not run
+  executedBy    String   @default("Human") // AI, Human
+  humanVerified Boolean  @default(false)
+  actual        String   @default("")
+  evidenceUrl   String   @default("")
+  notes         String   @default("")
+  executedAt    DateTime @default(now())
+
+  @@unique([buildId, testCaseId])
+}
+
+model Bug {
+  id                String    @id @default(cuid())
+  releaseId         String
+  release           Release   @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  bugId             String // BUG-314
+  title             String
+  module            String
+  severity          String // Critical, High, Medium, Low
+  priority          String    @default("P2") // P1, P2, P3
+  status            String    @default("Open") // Open, In progress, Fixed, Reopened, Closed, Rejected
+  storyRefId        String?
+  story             Story?    @relation(fields: [storyRefId], references: [id], onDelete: SetNull)
+  testCaseRefId     String?
+  testCase          TestCase? @relation(fields: [testCaseRefId], references: [id], onDelete: SetNull)
+  environment       String    @default("QA")
+  buildNo           String    @default("")
+  browser           String    @default("")
+  precondition      String    @default("")
+  steps             String    @default("")
+  testData          String    @default("")
+  expected          String    @default("")
+  actual            String    @default("")
+  evidenceUrl       String    @default("")
+  reproducedByHuman Boolean   @default(false)
+  workaround        String    @default("")
+  reopenCount       Int       @default(0)
+  loggedAt          DateTime  @default(now())
+  fixedAt           DateTime?
+  closedAt          DateTime?
+  webhookStatus     String    @default("not sent") // not sent, sent, failed
+  webhookResponse   String    @default("")
+
+  @@unique([releaseId, bugId])
+}
+
+model AutomationRun {
+  id          String   @id @default(cuid())
+  releaseId   String
+  release     Release  @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  source      String   @default("playwright") // playwright, newman, manual
+  runLabel    String   @default("")
+  passed      Int
+  failed      Int      @default(0)
+  flaky       Int      @default(0)
+  skipped     Int      @default(0)
+  total       Int
+  durationSec Int      @default(0)
+  ranAt       DateTime @default(now())
+}
+
+model Escape {
+  id          String   @id @default(cuid())
+  releaseId   String
+  release     Release  @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  escapeId    String
+  module      String
+  severity    String
+  stageMissed String
+  description String   @default("")
+  testAdded   Boolean  @default(false)
+  loggedAt    DateTime @default(now())
+}
+
+model StageStatus {
+  id        String   @id @default(cuid())
+  releaseId String
+  release   Release  @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  stageNo   Int
+  status    String   @default("Pending") // Pending, In progress, Done, Failed
+  note      String   @default("")
+  updatedAt DateTime @updatedAt
+
+  @@unique([releaseId, stageNo])
+}
+
+model Signoff {
+  id             String   @id @default(cuid())
+  releaseId      String   @unique
+  release        Release  @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  recommendation String // Go, No-go, Go with conditions
+  scopeTested    String   @default("")
+  scopeNotTested String   @default("")
+  risks          String   @default("")
+  signedBy       String   @default("")
+  buildNo        String   @default("")
+  metricsJson    String   @default("{}")
+  signedAt       DateTime @default(now())
+}
+
+model Setting {
+  key   String @id
+  value String
+}
