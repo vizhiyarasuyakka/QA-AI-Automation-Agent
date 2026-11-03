@@ -7,7 +7,7 @@ import { engineProblem, selectedEngine, skillFor } from "./engines";
 import { syncStages } from "./flows";
 import { launchJob, runningJob } from "./jobs";
 import { screenDifference } from "./pixels";
-import { captureApp, compareElements, DEFAULT_WIDTH, openChrome, renderPrototype, SCREEN_WIDTHS, type ScreenDiff, type Session } from "./screencompare";
+import { captureApp, compareElements, DEFAULT_WIDTH, FIELD_KINDS, openChrome, renderPrototype, SCREEN_WIDTHS, type ScreenDiff, type Session } from "./screencompare";
 import { accountLine, SIGN_IN_RULE } from "./testurl";
 import { prisma } from "./prisma";
 
@@ -93,20 +93,39 @@ async function readyBuild(releaseId: string, buildId: string) {
 
 type MatchScreen = { id: string; releaseId: string; module: string; screen: string; fileName: string; pagePath: string };
 
+/** One numbered line of a bug draft: the number is the one boxed on the evidence picture. */
+const diffLine = (d: ScreenDiff, i: number) => `${i + 1}. ${d.kind}: ${d.element}.${d.prototype || d.build ? ` Prototype shows ${d.prototype || "nothing"}; build shows ${d.build || "nothing"}.` : ""}`;
+
+/** Which of the prototype's fields the build has, which it lacks or adds, and how many other differences there are. */
+function describeComparison({ differences, fields }: ReturnType<typeof compareElements>) {
+  const named = (kind: string) => differences.filter((d) => d.kind === kind).map((d) => d.element);
+  const missing = named("Missing field"), extra = named("Extra field");
+  const changed = differences.filter((d) => FIELD_KINDS.has(d.kind)).length - missing.length - extra.length;
+  const others = differences.filter((d) => !FIELD_KINDS.has(d.kind)).length;
+  return [
+    fields.prototype ? `Fields: ${fields.prototype - missing.length} of the prototype's ${fields.prototype} are in the build.` : fields.build ? "The prototype has no form fields." : "No form fields on this screen.",
+    missing.length && `Missing from the build: ${missing.join(", ")}.`,
+    extra.length && `In the build but not in the prototype: ${extra.join(", ")}.`,
+    changed && `${changed} ${changed === 1 ? "field differs" : "fields differ"} in label, kind or required mark.`,
+    others ? `${others} other differences in wording, style or place.` : "Same wording, style and place.",
+  ].filter(Boolean).join(" ");
+}
+
 /**
- * Store one screen's comparison. Measured pixels decide when they say the screen is the same; otherwise any difference
- * found makes it a Mismatch, and a Match needs the screenshot it was judged from. The drawn prototype and the changed
- * pixels are kept beside it.
+ * Store one screen's comparison. Measured pixels decide when they say the screen is the same, except for form fields:
+ * a missing checkbox changes few pixels, so a field difference always counts. Otherwise any difference found makes it
+ * a Mismatch, and a Match needs the screenshot it was judged from. The drawn prototype and the changed pixels are kept
+ * beside it.
  */
 export async function saveMatch(p: MatchScreen, build: { number: string; envUrl: string }, report: MatchReport, shot: Uint8Array<ArrayBuffer> | null, pixels: number | null = null, byHand = false, pictures: { prototype?: Uint8Array<ArrayBuffer> | null; diff?: Uint8Array<ArrayBuffer> | null } = {}) {
   const blocked = report.result === "Blocked";
   const samePixels = !blocked && !!shot && pixels !== null && pixels <= PIXEL_MATCH_PERCENT;
-  const diffs = samePixels ? [] : report.differences.filter((d) => d.element?.trim());
+  const diffs = report.differences.filter((d) => d.element?.trim() && (!samePixels || FIELD_KINDS.has(d.kind)));
   // A person's own look needs no screenshot; the model's Match does.
   const unproven = !byHand && !blocked && !diffs.length && report.result !== "Mismatch" && !shot;
-  const result = blocked || unproven ? "Blocked" : samePixels ? "Match" : diffs.length || report.result === "Mismatch" ? "Mismatch" : "Match";
+  const result = blocked || unproven ? "Blocked" : diffs.length ? "Mismatch" : samePixels ? "Match" : report.result === "Mismatch" ? "Mismatch" : "Match";
   const measured = pixels === null || blocked ? "" : `${pixels.toFixed(2)}% of pixels differ. `;
-  const summary = unproven ? "No screenshot was saved, so the match could not be confirmed." : samePixels ? `${measured}The screen is the same as the prototype.` : `${measured}${report.summary ?? ""}`;
+  const summary = unproven ? "No screenshot was saved, so the match could not be confirmed." : samePixels && !diffs.length ? `${measured}The screen is the same as the prototype.` : `${measured}${report.summary ?? ""}`;
   let pagePath = p.pagePath;
   if (!pagePath) {
     try {
@@ -124,9 +143,10 @@ export async function saveMatch(p: MatchScreen, build: { number: string; envUrl:
   const data = {
     source: "ui", module: p.module || p.screen, title: `${p.screen}: does not match the prototype`.slice(0, 80), buildNo: build.number,
     steps: `1. Open ${new URL(pagePath || "/", build.envUrl).href}\n2. Compare it with prototype ${p.fileName}`,
-    expected: `Looks the same as prototype ${p.fileName}`,
-    actual: kept.map((d) => `${d.element} (${d.kind}): prototype shows ${d.prototype || "nothing"}; build shows ${d.build || "nothing"}`).join("\n") || summary,
-    evidenceUrl: shot ? `/releases/${p.releaseId}/ui-testing/match/${p.id}` : "",
+    expected: `Looks the same as prototype ${p.fileName}, with the same fields`,
+    actual: kept.map(diffLine).join("\n") || summary,
+    // The prototype and the build side by side, each difference boxed with its number from the list above.
+    evidenceUrl: shot ? `/releases/${p.releaseId}/ui-testing/match/${p.id}?view=evidence` : "",
   };
   await prisma.bugCandidate.upsert({ where: { releaseId_refKey: { releaseId: p.releaseId, refKey } }, update: { ...data, status: "Pending" }, create: { releaseId: p.releaseId, refKey, ...data } });
   return result;
@@ -134,8 +154,8 @@ export async function saveMatch(p: MatchScreen, build: { number: string; envUrl:
 
 /**
  * Stage 5: each screen of the URL to test against its prototype, in a hidden Chrome on this machine. Playwright draws
- * both at the same size and pixelmatch counts the changed pixels; for an HTML prototype every text is compared too.
- * No Claude plan is used.
+ * both at the same size and pixelmatch counts the changed pixels; for an HTML prototype every form field and every text
+ * is compared too. No Claude plan is used.
  */
 export async function startUiMatch(releaseId: string, buildId: string, screenIds?: string[], width = DEFAULT_WIDTH): Promise<string | null> {
   if (await runningJob(releaseId)) return "Another run is already in progress for this release.";
@@ -182,7 +202,7 @@ export async function startUiMatch(releaseId: string, buildId: string, screenIds
               continue;
             }
             const drawn = proto.rendered ? proto.capture.shot : null;
-            const app = await captureApp(browser, { url: page, home: build.envUrl, screen: p.screen, view: proto.view, withElements: !!proto.capture.elements, account: { user: build.loginUser, password: build.loginPassword }, session });
+            const app = await captureApp(browser, { url: page, home: build.envUrl, screen: p.screen, view: proto.view, withElements: !!proto.capture.content, account: { user: build.loginUser, password: build.loginPassword }, session });
             if ("blocked" in app) {
               await blocked(app.blocked, drawn);
               continue;
@@ -193,12 +213,15 @@ export async function startUiMatch(releaseId: string, buildId: string, screenIds
               await blocked("The prototype and the screenshot could not be compared.", drawn);
               continue;
             }
-            const differences = proto.capture.elements && app.capture.elements ? compareElements(proto.capture.elements, app.capture.elements) : [];
+            const compared = proto.capture.content && app.capture.content ? compareElements(proto.capture.content, app.capture.content) : null;
+            const differences = compared?.differences ?? [];
             const sizes = `Prototype ${pixels.prototypeSize.width}×${pixels.prototypeSize.height}, app ${pixels.shotSize.width}×${pixels.shotSize.height}.`;
-            const summary = proto.capture.elements ? `${differences.length ? `${differences.length} differences in wording, style or place.` : "Same wording, style and place."} ${sizes}` : sizes;
+            const busy = app.capture.loading ? "The build was still showing loading placeholders after 20 seconds, so some of what it lacks may only not have loaded. " : "";
+            const summary = `${busy}${compared ? `${describeComparison(compared)} ` : ""}${sizes}`;
             const result = await saveMatch(p, build, { result: differences.length || pixels.percent > PIXEL_MATCH_PERCENT ? "Mismatch" : "Match", url: app.capture.url, summary, differences }, app.capture.shot, pixels.percent, false, { prototype: drawn, diff: pixels.diff });
             if (result === "Mismatch") differ++;
-            ctx.log(`${p.screen}: ${result}, ${pixels.percent.toFixed(2)}% of pixels differ${differences.length ? `, ${differences.length} differences` : ""}.`);
+            const missing = differences.filter((d) => d.kind === "Missing field").length, extra = differences.filter((d) => d.kind === "Extra field").length;
+            ctx.log(`${p.screen}: ${result}, ${pixels.percent.toFixed(2)}% of pixels differ${differences.length ? `, ${differences.length} differences` : ""}${missing ? `, ${missing} fields missing` : ""}${extra ? `, ${extra} fields not in the prototype` : ""}.`);
           } catch (e) {
             failed++;
             ctx.log(`${p.screen}: could not compare. ${(e instanceof Error ? e.message : String(e)).split("\n")[0]}`);

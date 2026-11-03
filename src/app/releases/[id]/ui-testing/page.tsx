@@ -10,7 +10,7 @@ import { JobPanel } from "@/components/JobPanel";
 import { flowStates } from "@/lib/flows";
 import { runningJob } from "@/lib/jobs";
 import type { ScreenDiff } from "@/lib/uitesting";
-import { DEFAULT_WIDTH, SCREEN_WIDTHS } from "@/lib/screencompare";
+import { DEFAULT_WIDTH, FIELD_KINDS, SCREEN_WIDTHS } from "@/lib/screencompare";
 import { compareScreens, deleteTrigger, findTriggers, markScreen, runUiTest, saveUiTarget } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -18,13 +18,27 @@ export const dynamic = "force-dynamic";
 const matchTone = (r: string) => (r === "Match" ? "ok" : r === "Mismatch" ? "bad" : r === "Blocked" ? "warn" : undefined);
 const showsAsPicture = (mime: string) => mime.startsWith("image/") && mime !== "image/svg+xml";
 
-/** A screenshot that opens at full size in a new tab. */
-function Picture({ href, alt }: { href: string; alt: string }) {
+/** A screenshot that opens at full size in a new tab. A small one is a close-up in a table, loaded when scrolled to. */
+function Picture({ href, alt, small = false }: { href: string; alt: string; small?: boolean }) {
   return (
     <a href={href} target="_blank" rel="noreferrer">
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={href} alt={alt} style={{ width: "100%", border: "1px solid var(--line)" }} />
+      <img src={href} alt={alt} loading={small ? "lazy" : undefined} style={{ width: small ? 150 : "100%", display: "block", border: "1px solid var(--line)" }} />
     </a>
+  );
+}
+
+/** The fields on one side only, each linked to its numbered row and close-ups below. */
+function FieldList({ title, rows, anchor }: { title: string; rows: { d: ScreenDiff; i: number }[]; anchor: (i: number) => string }) {
+  return (
+    <div>
+      <strong>{title} ({rows.length})</strong>
+      {rows.length ? (
+        <ul style={{ margin: ".3rem 0 0", paddingLeft: "1.1rem" }}>
+          {rows.map(({ d, i }) => <li key={i}><a href={`#${anchor(i)}`}>{i + 1}. {d.element}</a> <span className="muted">{d.prototype || d.build}</span></li>)}
+        </ul>
+      ) : <p className="muted" style={{ margin: ".3rem 0 0" }}>None</p>}
+    </div>
   );
 }
 
@@ -55,7 +69,7 @@ export default async function UiTestingPage({ params, searchParams }: { params: 
   return (
     <>
       <h1>{release.name}: UI testing</h1>
-      <p className="muted">Step 5. Enter the URL to test and the sign-in for it, then check that each screen looks exactly like its prototype: all at once or one by one. A hidden Chrome on this machine opens the app at the prototype's size and signs in when it asks. Free, open-source tools compare the two: Playwright draws both pages and pixelmatch marks every changed pixel. A screen can also be marked by hand. Every difference becomes a bug draft with the pictures.</p>
+      <p className="muted">Step 5. Enter the URL to test and the sign-in for it, then check that each screen looks exactly like its prototype: all at once or one by one. A hidden Chrome on this machine opens the app at the prototype's size and signs in when it asks. Free, open-source tools compare the two: Playwright draws both pages, checks every field and text, and pixelmatch marks every changed pixel. A screen can also be marked by hand. Every difference becomes a bug draft with screenshot evidence.</p>
       <ReleaseNav releaseId={id} active="ui" />
       <Notice searchParams={sp} />
 
@@ -90,7 +104,7 @@ export default async function UiTestingPage({ params, searchParams }: { params: 
         ) : (
           <form action={compareScreens} className="stack">
             <input type="hidden" name="releaseId" value={id} />
-            <p className="muted" style={{ margin: 0 }}>Each page opens at the prototype's size: the width chosen here for an HTML or SVG prototype, the picture's own size for PNG, JPG or WEBP. pixelmatch counts the pixels that differ; up to 0.5% counts as the same. For an HTML prototype every text on the page is compared too: missing, extra or reworded, and its colour, background, font, size and place. Table cells and numbers are sample data and do not count. The prototype, the app and the changed pixels stay below to check by eye.</p>
+            <p className="muted" style={{ margin: 0 }}>Each page opens at the prototype's size: the width chosen here for an HTML or SVG prototype, the picture's own size for PNG, JPG or WEBP. pixelmatch counts the pixels that differ; up to 0.5% counts as the same. For an HTML prototype every form field is checked as well: which fields of the prototype the build is missing, which fields the build has that the prototype does not, and a field's label, kind and required mark; a field difference always counts, however few pixels it changes. Every text is compared too: missing, extra or reworded, and its colour, background, font, size and place. Only what is shown counts, not what is hidden or covered. Table cells, table rows and numbers are sample data and do not count. Each difference gets a close-up of the prototype and the build with the spot boxed, and an evidence picture marks them all.</p>
             <div className="row">
               <label className="row" style={{ gap: ".4rem", margin: 0 }}><span className="muted">Screen width</span><select name="width" defaultValue={DEFAULT_WIDTH} aria-label="Screen width" style={{ width: "auto" }}>{SCREEN_WIDTHS.map((w) => <option key={w} value={w}>{w}px</option>)}</select></label>
               <button type="submit" className="secondary" name="save" value="1">Save pages</button>
@@ -108,7 +122,11 @@ export default async function UiTestingPage({ params, searchParams }: { params: 
                       <td>{p.module || <span className="muted">Any</span>}</td>
                       <td style={{ minWidth: 200 }}><input name={`path:${p.id}`} defaultValue={p.pagePath} placeholder="/accounts, or blank to find it by name" aria-label={`Page for ${p.screen}`} /></td>
                       <td><Badge tone={matchTone(p.matchResult)}>{p.matchResult}</Badge>{p.matchSummary === "Checked by hand." && <div className="muted">By hand</div>}</td>
-                      <td className="num">{p.matchResult === "Not run" ? <span className="muted">-</span> : (JSON.parse(p.matchDiffs) as ScreenDiff[]).length}</td>
+                      <td className="num">{p.matchResult === "Not run" ? <span className="muted">-</span> : (() => {
+                        const diffs = JSON.parse(p.matchDiffs) as ScreenDiff[];
+                        const inFields = diffs.filter((d) => FIELD_KINDS.has(d.kind)).length;
+                        return <>{diffs.length}{inFields > 0 && <div className="muted">{inFields} in fields</div>}</>;
+                      })()}</td>
                       <td><button type="submit" className="small secondary" name="screen" value={p.id} disabled={!!running}>Compare</button></td>
                       <td style={{ whiteSpace: "nowrap" }}>
                         <select name={`mark:${p.id}`} defaultValue={p.matchResult === "Not run" ? "Match" : p.matchResult} aria-label={`Result of ${p.screen}`} style={{ width: "auto" }}>{["Match", "Mismatch", "Blocked"].map((x) => <option key={x}>{x}</option>)}</select>
@@ -129,6 +147,9 @@ export default async function UiTestingPage({ params, searchParams }: { params: 
       {compared.map((p) => {
         const diffs = JSON.parse(p.matchDiffs) as ScreenDiff[];
         const shots = `/releases/${id}/ui-testing/match/${p.id}?t=${p.matchAt?.getTime() ?? 0}&`;
+        const only = (kind: string) => diffs.flatMap((d, i) => (d.kind === kind ? [{ d, i }] : []));
+        const anchor = (i: number) => `diff-${p.id}-${i + 1}`;
+        const evidence = p.matchResult === "Mismatch" && matchShots.has(p.id);
         return (
           <section key={p.id} className="card" style={{ marginBottom: ".75rem" }}>
             <div className="row spread">
@@ -136,17 +157,53 @@ export default async function UiTestingPage({ params, searchParams }: { params: 
               <Badge tone={matchTone(p.matchResult)}>{p.matchResult}</Badge>
             </div>
             {p.matchSummary && <p className="muted" style={{ margin: ".35rem 0 .6rem" }}>{p.matchSummary}</p>}
+            {diffs.some((d) => FIELD_KINDS.has(d.kind)) && (
+              <div className="fields" style={{ marginBottom: ".75rem" }}>
+                <FieldList title="In the prototype, missing from the build" rows={only("Missing field")} anchor={anchor} />
+                <FieldList title="In the build, not in the prototype" rows={only("Extra field")} anchor={anchor} />
+              </div>
+            )}
+            {evidence && (
+              <p style={{ margin: "0 0 .6rem" }}>
+                <a href={`${shots}view=evidence`} target="_blank" rel="noreferrer">Open the evidence picture</a>{" "}
+                <span className="muted">The prototype and the build side by side, each difference boxed with its number from the list. The bug draft links to it.</span>
+              </p>
+            )}
             {diffs.length > 0 && (
               <div className="tbox" style={{ marginBottom: ".75rem" }}>
                 <table>
-                  <thead><tr><th>Element</th><th>Kind</th><th>Prototype shows</th><th>Build shows</th></tr></thead>
-                  <tbody>{diffs.map((d, i) => <tr key={i}><td><strong>{d.element}</strong></td><td>{d.kind}</td><td>{d.prototype || <span className="muted">Nothing</span>}</td><td>{d.build || <span className="muted">Nothing</span>}</td></tr>)}</tbody>
+                  <thead><tr><th className="num">#</th><th>Element</th><th>Kind</th><th>Prototype shows</th><th>Build shows</th><th>Evidence: prototype, build</th></tr></thead>
+                  <tbody>
+                    {diffs.map((d, i) => (
+                      <tr key={i} id={anchor(i)}>
+                        <td className="num">{i + 1}</td>
+                        <td><strong>{d.element}</strong></td>
+                        <td>{FIELD_KINDS.has(d.kind) ? <Badge tone="bad">{d.kind}</Badge> : d.kind}</td>
+                        <td>{d.prototype || <span className="muted">Nothing</span>}</td>
+                        <td>{d.build || <span className="muted">Nothing</span>}</td>
+                        <td>
+                          {d.at && rendered.has(p.id) && matchShots.has(p.id) ? (
+                            <div className="row" style={{ flexWrap: "nowrap", alignItems: "flex-start" }}>
+                              <Picture small href={`${shots}view=prototype&n=${i}`} alt={`${d.element} on the prototype of ${p.screen}`} />
+                              <Picture small href={`${shots}view=app&n=${i}`} alt={`${d.element} on ${p.screen} in the build`} />
+                            </div>
+                          ) : <span className="muted">-</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
                 </table>
               </div>
             )}
             <details open={p.matchResult === "Mismatch"}>
               <summary>Prototype, app and changed pixels</summary>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: ".75rem", marginTop: ".5rem" }}>
+                {evidence && (
+                  <figure style={{ margin: 0, gridColumn: "1 / -1" }}>
+                    <figcaption className="muted">Every difference boxed and numbered: prototype left, build right. A dashed box marks where an element is absent.</figcaption>
+                    <Picture href={`${shots}view=evidence`} alt={`${p.screen}: prototype and build with each difference marked`} />
+                  </figure>
+                )}
                 <figure style={{ margin: 0 }}>
                   <figcaption className="muted">Prototype</figcaption>
                   {rendered.has(p.id) ? <Picture href={`${shots}view=prototype`} alt={`Prototype of ${p.screen}`} />
