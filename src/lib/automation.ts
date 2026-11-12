@@ -5,6 +5,7 @@ import path from "node:path";
 import { askBrowserAgent, askChromeJson, findClaudeCli, isPlanLimit, TruncatedError } from "./claude";
 import { accountLine, checkTestUrl, isLocalAddress, planCases } from "./testurl";
 import { applyToBuild, firstLine, flattenPlaywright } from "../app/api/import/_shared";
+import { draftsFromFailedCases } from "./bugflow";
 import { parseCriteria, splitList } from "./coverage";
 import { askEngine, engineProblem, selectedEngine } from "./engines";
 import { syncStages } from "./flows";
@@ -39,11 +40,12 @@ async function syntaxError(code: string): Promise<{ checked: boolean; error: str
   }
 }
 
-export async function startPlaywright(releaseId: string): Promise<string | null> {
+/** Writes the specs for every story with test cases, or for the stories named. */
+export async function startPlaywright(releaseId: string, storyIds?: string[]): Promise<string | null> {
   if (await runningJob(releaseId)) return "Another run is already in progress for this release.";
-  const stories = await prisma.story.findMany({ where: { releaseId }, orderBy: { storyId: "asc" }, include: { testCases: { orderBy: { tcId: "asc" } } } });
+  const stories = await prisma.story.findMany({ where: { releaseId, ...(storyIds ? { id: { in: storyIds } } : {}) }, orderBy: { storyId: "asc" }, include: { testCases: { orderBy: { tcId: "asc" } } } });
   const withCases = stories.filter((s) => s.testCases.length);
-  if (!withCases.length) return "Generate test cases first.";
+  if (!withCases.length) return storyIds ? "This story has no test cases yet. Generate them in step 2 first." : "Generate test cases first.";
   const problem = await engineProblem("playwright");
   if (problem) return problem;
   const engine = await selectedEngine("playwright");
@@ -276,19 +278,30 @@ const RUN_CONFIG = `import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./tests",
-  timeout: 60_000,
+  timeout: 120_000,
   workers: 1,
   reporter: [["json", { outputFile: "results.json" }]],
-  use: { baseURL: process.env.BASE_URL, channel: "chrome", headless: true, screenshot: "off" },
+  use: { baseURL: process.env.BASE_URL, channel: "chrome", headless: true, screenshot: "on" },
 });
 `;
 const SCRIPT_RUN_TIMEOUT_MS = 30 * 60 * 1000;
 
 /** Step 6's run: every stored script, run here by Playwright Test in a hidden Chrome on the URL to test, signed in with step 4's test account. Results go to the cases by TC ID. */
-export async function startScriptRun(releaseId: string): Promise<string | null> {
+export type RunScope = { storyId?: string; tcId?: string };
+
+/** Playwright's -g takes a regular expression; a TC ID must match as itself, as a whole word. */
+const grepFor = (tcId: string) => `(^|[^A-Za-z0-9-])${tcId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^A-Za-z0-9-])`;
+
+/**
+ * Runs every stored script, one story's scripts, or one test case: the script file that holds its TC ID, with Playwright
+ * told to run only the test titled with it.
+ */
+export async function startScriptRun(releaseId: string, scope: RunScope = {}): Promise<string | null> {
   if (await runningJob(releaseId)) return "Another run is already in progress for this release.";
-  const scripts = await prisma.automationScript.findMany({ where: { releaseId }, orderBy: { fileName: "asc" } });
-  if (!scripts.length) return "Generate the scripts first.";
+  const stored = await prisma.automationScript.findMany({ where: { releaseId, ...(scope.storyId ? { storyRefId: scope.storyId } : {}) }, orderBy: { fileName: "asc" } });
+  const scripts = scope.tcId ? stored.filter((s) => s.tcIds.split(",").map((x) => x.trim()).includes(scope.tcId!)) : stored;
+  if (!scripts.length) return scope.tcId ? `No stored script has a test for ${scope.tcId}. Generate this story's scripts first.` : scope.storyId ? "This story has no scripts yet. Generate them first." : "Generate the scripts first.";
+  const label = scope.tcId ? `Run of ${scope.tcId}` : scope.storyId ? `Run of one story` : "Run in step 5";
   const build = await prisma.build.findFirst({ where: { releaseId }, orderBy: { deployedAt: "desc" } });
   if (!build || !checkTestUrl(build.envUrl)) return "Enter the URL to test in step 4 first.";
   const cli = path.join(process.cwd(), "node_modules", "@playwright", "test", "cli.js");
@@ -308,7 +321,7 @@ export async function startScriptRun(releaseId: string): Promise<string | null> 
         mkdirSync(path.join(dir, "tests"));
         writeFileSync(path.join(dir, "playwright.config.ts"), RUN_CONFIG);
         for (const s of scripts) writeFileSync(path.join(dir, "tests", path.basename(s.fileName)), s.code);
-        const output = await runPlaywright(cli, dir, { BASE_URL: new URL(build.envUrl).origin, QA_USER: build.loginUser, QA_PASSWORD: build.loginPassword });
+        const output = await runPlaywright(cli, dir, { BASE_URL: new URL(build.envUrl).origin, QA_USER: build.loginUser, QA_PASSWORD: build.loginPassword }, scope.tcId ? ["-g", grepFor(scope.tcId)] : []);
         const file = path.join(dir, "results.json");
         if (!existsSync(file)) {
           ctx.log(`Playwright could not finish the run. ${output.trim().slice(-1500)}`);
@@ -317,8 +330,11 @@ export async function startScriptRun(releaseId: string): Promise<string | null> 
         const report = JSON.parse(readFileSync(file, "utf8"));
         const results = flattenPlaywright(report);
         const count = (st: string) => results.filter((r) => r.status === st).length;
-        await prisma.automationRun.create({ data: { releaseId, source: "playwright", runLabel: "Run in step 6", passed: count("passed"), failed: count("failed"), flaky: count("flaky"), skipped: count("skipped"), total: results.length, durationSec: Math.round((report.stats?.duration ?? 0) / 1000) } });
+        await prisma.automationRun.create({ data: { releaseId, source: "playwright", runLabel: label, passed: count("passed"), failed: count("failed"), flaky: count("flaky"), skipped: count("skipped"), total: results.length, durationSec: Math.round((report.stats?.duration ?? 0) / 1000) } });
+        // The screenshots are read into the executions before the run folder goes.
         const mapped = await applyToBuild(releaseId, build.number, results);
+        const drafted = await draftsFromFailedCases(releaseId);
+        if (drafted) ctx.log(`${drafted} failures are in Bugs and reports as drafts.`);
         for (const r of results.filter((x) => x.status === "failed").slice(0, 30)) ctx.log(`${r.title}: failed. ${r.error ?? ""}`.trim());
         // A file that does not compile shows up here, not as a test.
         for (const e of (report.errors ?? []).slice(0, 10)) ctx.log(`Playwright could not load a script. ${firstLine(String(e.message ?? ""))}`);
@@ -334,9 +350,9 @@ export async function startScriptRun(releaseId: string): Promise<string | null> 
 }
 
 /** Playwright Test in a child process. The test account goes into its environment only, never into a file or the log. */
-function runPlaywright(cli: string, cwd: string, env: Record<string, string>): Promise<string> {
+export function runPlaywright(cli: string, cwd: string, env: Record<string, string>, extraArgs: string[] = []): Promise<string> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [cli, "test", "-c", "playwright.config.ts"], { cwd, env: { ...process.env, ...env, CI: "1" }, windowsHide: true, timeout: SCRIPT_RUN_TIMEOUT_MS });
+    const child = spawn(process.execPath, [cli, "test", "-c", "playwright.config.ts", ...extraArgs], { cwd, env: { ...process.env, ...env, CI: "1" }, windowsHide: true, timeout: SCRIPT_RUN_TIMEOUT_MS });
     let out = "";
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (out += d));

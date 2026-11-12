@@ -7,17 +7,9 @@ import { Badge } from "@/components/Badge";
 import { EnginePicker } from "@/components/EnginePicker";
 import { Notice } from "@/components/Notice";
 import { connectMcp, recheckConnections, saveMcpTool, saveReportTool, saveSettings } from "./actions";
-import { THRESHOLDS } from "@/lib/workflow";
+import { STAGES, STAGE_USES, THRESHOLDS } from "@/lib/workflow";
 
 export const dynamic = "force-dynamic";
-
-const STEP_USE: Record<Flow, string> = {
-  testcases: "Reads the stories from the stored files, then writes test cases and test data until every criterion and field rule is covered.",
-  playwright: "Turns test cases into stored Playwright specs.",
-  execution: "Runs test cases and records pass or fail.",
-  ui: "Compares each built screen with its prototype, and tests the triggers on it.",
-  bugs: "Sends confirmed bugs and the pass and fail report to your tracker.",
-};
 
 export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ ok?: string; err?: string; info?: string }> }) {
   const sp = await searchParams;
@@ -41,17 +33,31 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
       <p className="muted">What is connected on this machine, which workflow step uses it, and when. Read live from Claude Code.</p>
       <Notice searchParams={sp} />
 
-      <h2>What each step uses</h2>
+      <h2>What each stage uses</h2>
       <div className="card" style={{ marginBottom: "1rem" }}>
-        <p className="muted"><Badge tone={conn.ok ? "ok" : "bad"}>{conn.ok ? "Claude connected" : "Claude not connected"}</Badge> {conn.detail}. Model: {process.env.ANTHROPIC_MODEL || "claude-sonnet-5-5"}.</p>
-        {flows.map((f) => (
-          <div key={f} className="step-row">
-            <div><strong>{FLOW_LABELS[f]}</strong><div className="muted">{STEP_USE[f]}</div></div>
-            {f === "execution"
-              ? <p className="muted" style={{ margin: 0 }}>Both are always on the Test execution page: record results by hand, or run the ticked cases in Chrome through Claude in Chrome.</p>
-              : <EnginePicker flow={f} back="/settings" />}
-          </div>
-        ))}
+        <p className="muted"><Badge tone={conn.ok ? "ok" : "bad"}>{conn.ok ? "Claude connected" : "Claude not connected"}</Badge> {conn.detail}. Model: {process.env.ANTHROPIC_MODEL || "claude-sonnet-5-5"}. Every tool named below is free; Claude, ChatGPT and plugin skills come in only where the third column says, and the connection for those stages is chosen in the last column.</p>
+        <div className="tbox">
+          <table>
+            <thead><tr><th>Stage</th><th>Free tools</th><th>Claude, ChatGPT and plugin skills</th><th>Connection</th></tr></thead>
+            <tbody>
+              {STAGES.map((s) => {
+                const u = STAGE_USES[s.no];
+                return (
+                  <tr key={s.no}>
+                    <td style={{ whiteSpace: "nowrap" }}><strong>{s.no}. {s.name}</strong></td>
+                    <td style={{ fontSize: 13 }}>{u.tools}</td>
+                    <td style={{ fontSize: 13 }}>{u.ai}</td>
+                    <td style={{ minWidth: 260 }}>
+                      {!u.flow ? <span className="muted">None needed</span>
+                        : u.flow === "execution" ? <span className="muted" style={{ fontSize: 13 }}>Chosen on the AC Check page: Claude in Chrome, or a Chrome window of its own for local addresses.</span>
+                        : <EnginePicker flow={u.flow} back="/settings" />}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="row spread"><h2>Skills that fit a step ({usable.length})</h2><form action={recheckConnections}><button className="small secondary" type="submit">Check connections again</button></form></div>

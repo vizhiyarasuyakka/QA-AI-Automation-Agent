@@ -9,7 +9,7 @@ import { getSetting, setSetting } from "./webhook";
 export { FLOW_LABELS, type Flow };
 export type EngineOption = { id: string; label: string; ok: boolean; detail: string; group?: string };
 
-const DEFAULTS: Record<Flow, string> = { testcases: "claude", playwright: "claude", execution: "manual", ui: "browser", bugs: "none" };
+const DEFAULTS: Record<Flow, string> = { testcases: "claude", playwright: "claude", execution: "manual", ui: "browser", api: "claude", bugs: "none" };
 
 export async function selectedEngine(flow: Flow) {
   const chosen = await getSetting(`ENGINE_${flow}`);

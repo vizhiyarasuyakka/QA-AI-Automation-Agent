@@ -19,20 +19,37 @@ export type StageDef = {
 };
 
 export const STAGES: StageDef[] = [
-  { no: 1, name: "Intake", gate: "Gate 1: every story has acceptance criteria", tools: "Store PRD, user stories, prototype and module fields", href: (r) => `/releases/${r}/documents` },
-  { no: 2, name: "Test design", tools: "Select user stories, generate test cases and test data, or paste", href: (r) => `/releases/${r}/stories` },
+  { no: 1, name: "Requirement docs", gate: "Gate 1: every story has acceptance criteria", tools: "Store PRD, user stories, prototype and module fields", href: (r) => `/releases/${r}/documents` },
+  { no: 2, name: "TC/TD: test cases and test data", tools: "Select user stories, generate test cases and test data, or paste", href: (r) => `/releases/${r}/stories` },
   { no: 3, name: "Test review", gate: "Gate 2: every case reviewed, every requirement covered", tools: "Export cases or mark them reviewed", href: (r) => `/releases/${r}/review` },
-  { no: 4, name: "Environment and test data", gate: "Gate 3: the URL to test is set", tools: "URL to test, entered in step 4", href: (r) => `/releases/${r}/execution` },
-  { no: 5, name: "Build acceptance (smoke)", gate: "Gate 4: smoke 100% pass", tools: "Playwright @smoke, Chrome extension", href: (r) => `/releases/${r}/execution` },
-  { no: 6, name: "Scripted execution", tools: "UI, API (Postman), Risk (CodeAnt) lanes", href: (r) => `/releases/${r}/execution` },
-  { no: 7, name: "Exploratory session", tools: "QA Bug Hunter, Playwright MCP, human charter", href: (r) => `/releases/${r}/execution` },
-  { no: 8, name: "Non-functional lane", tools: "axe-core, OWASP ZAP, k6, visual snapshots", href: (r) => `/releases/${r}/execution` },
-  { no: 9, name: "Defect logging", tools: "This app, webhook to in-house app", href: (r) => `/releases/${r}/bugs` },
-  { no: 10, name: "Retest and regression", tools: "Playwright @p1 @module", href: (r) => `/releases/${r}/bugs` },
-  { no: 11, name: "Automation harvest", tools: "Generated and stored Playwright scripts", href: (r) => `/releases/${r}/automation` },
-  { no: 12, name: "Sign-off and report", gate: "Gate 5: 0 Critical, 0 High open, P1 pass rate, NFR green, stability", tools: "This app", href: (r) => `/releases/${r}/signoff` },
+  { no: 4, name: "AC Check", gate: "Gate 3: the URL to test is set", tools: "The URL to test and the test account; every acceptance criterion checked in Chrome", href: (r) => `/releases/${r}/execution` },
+  { no: 5, name: "Smoke", gate: "Gate 4: every case flagged smoke passes; met when none is flagged", tools: "Flag cases smoke in Test case review; results come from Playwright runs or CI imports", href: (r) => `/releases/${r}/review` },
+  { no: 6, name: "Playwright Test", tools: "Specs written from the test cases, run with Playwright Test in a hidden Chrome or from CI", href: (r) => `/releases/${r}/automation` },
+  { no: 7, name: "API Test", tools: "Positive, negative and edge-case tests written from the API list, sent with Playwright", href: (r) => `/releases/${r}/api-testing` },
+  { no: 8, name: "UI Testing", tools: "Prototype compared screen by screen and flow by flow; user stories checked field by field", href: (r) => `/releases/${r}/ui-testing` },
+  { no: 9, name: "Security Testing", tools: "Built-in checks in Playwright and the OWASP ZAP baseline scan, both free; what fails is listed", href: (r) => `/releases/${r}/security` },
+  { no: 10, name: "Defect logging", tools: "This app, MCP connector or webhook to your tracker", href: (r) => `/releases/${r}/bugs` },
+  { no: 11, name: "Retest and regression", tools: "Fixed and Reopened statuses; reopen rate", href: (r) => `/releases/${r}/bugs` },
+  { no: 12, name: "Sign-off and report", gate: "Gate 5: 0 Critical, 0 High open, P1 pass rate, security green, stability", tools: "This app", href: (r) => `/releases/${r}/signoff` },
   { no: 13, name: "Post-release monitoring", tools: "Prod logs, support tickets", href: (r) => `/releases/${r}/signoff` },
 ];
+
+/** What each stage runs on: the free tools, and where Claude, Codex or a plugin skill comes in. flow names the connection it is chosen with in Settings. */
+export const STAGE_USES: Record<number, { tools: string; ai: string; flow?: "testcases" | "execution" | "playwright" | "api" | "ui" | "bugs" }> = {
+  1: { tools: "pdf-parse, mammoth and exceljs read the uploaded files; prototypes are kept as files", ai: "Claude reads prototype pictures when a step needs them (your login)" },
+  2: { tools: "coverage.ts computes what each story still lacks; exceljs writes the sheets", ai: "Claude or ChatGPT writes the test cases and test data; a plugin skill can shape them", flow: "testcases" },
+  3: { tools: "exceljs exports; no model runs", ai: "None" },
+  4: { tools: "Playwright opens a Chrome window of its own for local addresses", ai: "Claude in Chrome checks each criterion; on local addresses Claude drives Playwright", flow: "execution" },
+  5: { tools: "Playwright Test runs the smoke-flagged cases; CI imports at /api/import/playwright and /api/import/newman", ai: "None" },
+  6: { tools: "Playwright Test runs the specs in a hidden Chrome; download the zip to run them in CI", ai: "Claude or ChatGPT writes one spec per story; e2e plugin skills can be chosen", flow: "playwright" },
+  7: { tools: "Playwright's request API sends the tests, no browser; Postman collection and Newman supported", ai: "Claude or ChatGPT writes the positive, negative and edge-case tests", flow: "api" },
+  8: { tools: "Playwright, pixelmatch and sharp compare the prototype and the build and draw the evidence", ai: "Claude writes the user-story checks after the build is mapped, and finds the triggers", flow: "ui" },
+  9: { tools: "Built-in checks in Playwright (headers, cookies, HTTPS, redirects, reflected input, exposed files) and the OWASP ZAP baseline scan in Docker", ai: "None" },
+  10: { tools: "This app's bug form; MCP connector or webhook to your tracker", ai: "None; the connector is chosen here", flow: "bugs" },
+  11: { tools: "Status rules in this app", ai: "None" },
+  12: { tools: "The twelve metrics computed in workflow.ts", ai: "None" },
+  13: { tools: "Escapes logged by hand", ai: "None" },
+};
 
 export type Metrics = {
   stories: number;
@@ -50,6 +67,7 @@ export type Metrics = {
   counts: { pass: number; fail: number; blocked: number; notRun: number };
   smokeTotal: number;
   smokePass: number;
+  smokeFail: number;
   p1AiExecuted: number;
   p1HumanVerified: number;
   humanVerifiedRate: number;
@@ -116,7 +134,8 @@ export async function computeMetrics(releaseId: string): Promise<Metrics> {
   const runTotal = runs.reduce((a, r) => a + r.total, 0);
   const runPassed = runs.reduce((a, r) => a + r.passed, 0);
 
-  const nfr = stageRows.find((s) => s.stageNo === 8);
+  // Security green: stage 9 Done, a scan with nothing High or Medium open.
+  const nfr = stageRows.find((s) => s.stageNo === 9);
 
   return {
     stories: stories.length,
@@ -134,6 +153,7 @@ export async function computeMetrics(releaseId: string): Promise<Metrics> {
     counts,
     smokeTotal: smokeCases.length,
     smokePass: smokeExecs.filter((e) => e.result === "Pass").length,
+    smokeFail: smokeExecs.filter((e) => e.result === "Fail").length,
     p1AiExecuted: p1Ai.length,
     p1HumanVerified: p1Human.length,
     humanVerifiedRate: p1Ai.length ? p1Human.length / p1Ai.length : 1,
@@ -177,8 +197,9 @@ export async function evaluateGates(releaseId: string, m?: Metrics): Promise<Gat
   const g3: string[] = [];
   if (!latest?.envUrl.trim()) g3.push("no URL to test; enter it in step 4");
 
+  // Smoke is optional: with nothing flagged there is nothing to pass. Flagging cases in Test case review turns it into a gate.
   const g4: string[] = [];
-  if (!metrics.smokeTotal) g4.push("no smoke cases flagged"); else if (metrics.smokePass < metrics.smokeTotal) g4.push(`smoke ${metrics.smokePass}/${metrics.smokeTotal} passed`);
+  if (metrics.smokeTotal && metrics.smokePass < metrics.smokeTotal) g4.push(`smoke ${metrics.smokePass}/${metrics.smokeTotal} passed`);
 
   const g5: string[] = [];
   ([["Gate 1", g1], ["Gate 2", g2], ["Gate 3", g3], ["Gate 4", g4]] as const).forEach(([name, reasons]) => { if (reasons.length) g5.push(`${name} not met`); });
@@ -187,7 +208,7 @@ export async function evaluateGates(releaseId: string, m?: Metrics): Promise<Gat
   if (metrics.passRate.P1 < THRESHOLDS.P1_PASS_RATE) g5.push(`P1 pass rate ${(metrics.passRate.P1 * 100).toFixed(0)}% below ${THRESHOLDS.P1_PASS_RATE * 100}%`);
   if (metrics.progress < 1) g5.push(`execution ${(metrics.progress * 100).toFixed(0)}% of planned`);
   if (metrics.humanVerifiedRate < 1) g5.push(`${metrics.p1AiExecuted - metrics.p1HumanVerified} AI-executed P1 cases not human-verified`);
-  if (!metrics.nfrGreen) g5.push("non-functional lane not green");
+  if (!metrics.nfrGreen) g5.push("security testing not green");
   if (metrics.runsConsidered && metrics.automationStability < THRESHOLDS.AUTOMATION_STABILITY) g5.push(`automation stability ${(metrics.automationStability * 100).toFixed(0)}%`);
 
   return [

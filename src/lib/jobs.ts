@@ -1,7 +1,7 @@
 import { prisma } from "./prisma";
 
 /** "prd" lists the user stories from the stored files. */
-export type JobKind = "prd" | "testcases" | "playwright" | "pw-run" | "chrome" | "criteria" | "ui-extract" | "ui-run" | "ui-match";
+export type JobKind = "prd" | "testcases" | "playwright" | "pw-run" | "chrome" | "criteria" | "ui-extract" | "ui-run" | "ui-match" | "api-tests" | "api-run" | "story-checks" | "story-run" | "security";
 type Counters = { phase?: string; storiesTotal?: number; storiesDone?: number; casesAdded?: number; gapsLeft?: number };
 export type JobCtx = { log: (line: string) => void; set: (c: Counters) => Promise<unknown> };
 

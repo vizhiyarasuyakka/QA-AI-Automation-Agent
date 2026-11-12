@@ -3,14 +3,14 @@ import { Badge } from "./Badge";
 
 type Job = { kind: string; status: string; phase: string; engine: string; storiesTotal: number; storiesDone: number; casesAdded: number; gapsLeft: number; log: string; startedAt: Date; finishedAt: Date | null };
 
-const NAMES: Record<string, string> = { prd: "Story list", testcases: "Generation", playwright: "Script generation", "pw-run": "Script run", chrome: "Chrome run", criteria: "Acceptance criteria check", "ui-extract": "Trigger search", "ui-run": "UI test run", "ui-match": "Prototype comparison" };
+const NAMES: Record<string, string> = { prd: "Story list", testcases: "Generation", playwright: "Script generation", "pw-run": "Script run", chrome: "Chrome run", criteria: "Acceptance criteria check", "ui-extract": "Trigger search", "ui-run": "UI test run", "ui-match": "Prototype comparison", "api-tests": "API test writing", "api-run": "API test run", "story-checks": "Story check writing", "story-run": "Story check on the build", security: "Security scan" };
 
 export function JobPanel({ job }: { job: Job | null }) {
   if (!job) return null;
   const running = job.status === "Running";
   const name = NAMES[job.kind] ?? "Run";
   const generated = job.kind === "testcases";
-  const units = job.kind === "pw-run" ? "script files" : job.kind === "criteria" ? "criteria" : job.kind === "chrome" ? "cases" : job.kind === "ui-run" ? "triggers" : job.kind === "ui-extract" || job.kind === "ui-match" ? "screens" : "stories";
+  const units = job.kind === "pw-run" ? "script files" : job.kind === "criteria" ? "criteria" : job.kind === "chrome" ? "cases" : job.kind === "ui-run" ? "triggers" : job.kind === "api-tests" ? "endpoints" : job.kind === "api-run" ? "requests" : job.kind === "story-checks" || job.kind === "story-run" ? "stories" : job.kind === "security" ? "parts" : job.kind === "ui-extract" || job.kind === "ui-match" ? "screens" : "stories";
   return (
     <div className="card" style={{ marginBottom: "1rem" }}>
       {running && <AutoRefresh />}

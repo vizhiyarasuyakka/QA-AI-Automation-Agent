@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { STAGES, computeMetrics, evaluateGates, ensureStages, gateForStage, pct, THRESHOLDS } from "@/lib/workflow";
+import { syncStages } from "@/lib/flows";
 import { ReleaseNav } from "@/components/ReleaseNav";
 import { Badge, statusTone } from "@/components/Badge";
 import { Notice } from "@/components/Notice";
@@ -15,6 +16,8 @@ export default async function ReleaseBoard({ params, searchParams }: { params: P
   const release = await prisma.release.findUnique({ where: { id } });
   if (!release) notFound();
   await ensureStages(id);
+  // Opening the board brings every stage that follows a page up to date, so what it shows is what the pages did.
+  await syncStages(id);
   const [stages, metrics] = await Promise.all([prisma.stageStatus.findMany({ where: { releaseId: id } }), computeMetrics(id)]);
   const gates = await evaluateGates(id, metrics);
   const verdict = gates[4].met ? "Go" : "No-go";
@@ -26,7 +29,7 @@ export default async function ReleaseBoard({ params, searchParams }: { params: P
       <div className="row spread">
         <div>
           <h1>{release.name}</h1>
-          <p className="muted">Workflow board. Stage {current ? `${current.no}, ${current.name}` : "complete"}. Gates evaluate automatically from stories, builds, executions and bugs. Stages 1, 2 and 11 follow their flows; set the others yourself.</p>
+          <p className="muted">Workflow board. Stage {current ? `${current.no}, ${current.name}` : "complete"}. Gates evaluate automatically from stories, builds, executions and bugs. Every stage follows its page except 13 (Post-release), which you set yourself.</p>
         </div>
         <form action={setReleaseStatus} className="row">
           <input type="hidden" name="id" value={id} />
@@ -86,7 +89,7 @@ export default async function ReleaseBoard({ params, searchParams }: { params: P
           );
         })}
       </div>
-      <p className="muted" style={{ marginTop: "1rem" }}>A stage with a gate cannot be marked Done while its gate reads "not met". Stage 8 (Non-functional lane) marked Done is what Gate 5 reads as NFR green.</p>
+      <p className="muted" style={{ marginTop: "1rem" }}>A stage with a gate cannot be marked Done while its gate reads "not met". Stage 9 (Security Testing) Done, a scan with nothing High or Medium, is what Gate 5 reads as security green.</p>
     </>
   );
 }

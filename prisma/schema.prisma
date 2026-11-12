@@ -25,9 +25,164 @@ model Release {
   findings    PrdFinding[]
   scripts     AutomationScript[]
   prototypes  Prototype[]
+  uiFlows     UiFlow[]
   triggers    UiTrigger[]
   candidates  BugCandidate[]
   reports     ReportPush[]
+  apiTarget   ApiTarget?
+  apiEndpoints ApiEndpoint[]
+  apiTests    ApiTest[]
+  storyFlows  StoryFlow[]
+  storyChecks StoryCheck[]
+  securityScans    SecurityScan[]
+  securityFindings SecurityFinding[]
+}
+
+/// Stage 9: one security scan of the URL to test, by the built-in checks in Playwright and, when Docker runs, the OWASP ZAP baseline scan.
+model SecurityScan {
+  id         String            @id @default(cuid())
+  releaseId  String
+  release    Release           @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  buildNo    String            @default("")
+  baseUrl    String            @default("")
+  status     String            @default("Running") // Running, Done, Failed
+  zap        String            @default("") // how the ZAP scan went: ran, skipped or failed, with why
+  summary    String            @default("")
+  zapReport  String            @default("") // the HTML report ZAP writes
+  log        String            @default("")
+  startedAt  DateTime          @default(now())
+  finishedAt DateTime?
+  findings   SecurityFinding[]
+}
+
+/// One check of a scan: what was looked for, where, and what was found. Pass rows keep the list of what was checked complete.
+model SecurityFinding {
+  id          String       @id @default(cuid())
+  releaseId   String
+  release     Release      @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  scanId      String
+  scan        SecurityScan @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  source      String // zap, check
+  check       String
+  result      String // Fail, Warn, Pass
+  risk        String       @default("") // High, Medium, Low, Info
+  urls        String       @default("[]") // JSON string[]
+  evidence    String       @default("")
+  description String       @default("")
+  solution    String       @default("")
+  reference   String       @default("")
+  cwe         String       @default("")
+
+  @@index([scanId])
+}
+
+/// UI testing by user story: one state of the build a story describes, reached by opening a page and clicking, and what must be there.
+model StoryFlow {
+  id         String       @id @default(cuid())
+  releaseId  String
+  release    Release      @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  storyRefId String
+  story      Story        @relation(fields: [storyRefId], references: [id], onDelete: Cascade)
+  no         Int // 1, 2 within the story
+  name       String
+  page       String       @default("") // a path on the URL to test; blank = found by screen from wherever signing in lands
+  screen     String       @default("") // the name the app's navigation gives the page
+  steps      String       @default("[]") // JSON string[]: names of the controls clicked in order
+  result     String       @default("Not run") // Match, Mismatch, Blocked, Not run
+  summary    String       @default("")
+  url        String       @default("")
+  shot       Bytes? // the build after the steps; the checks' boxes are drawn on it
+  buildNo    String       @default("")
+  runAt      DateTime?
+  createdAt  DateTime     @default(now())
+  checks     StoryCheck[]
+
+  @@unique([storyRefId, no])
+}
+
+/// One thing a story says must be on a flow's screen: a field, its options, a control, a text, or the error saving without a value gives.
+model StoryCheck {
+  id        String    @id @default(cuid())
+  releaseId String
+  release   Release   @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  flowId    String
+  flow      StoryFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  no        Int
+  kind      String // field, options, control, text, validation
+  target    String
+  expect    String    @default("")
+  spec      String    @default("{}") // JSON {fieldType, required, options, exact, fill, submit, words}
+  criteria  String    @default("") // AC1,AC3
+  result    String    @default("Not run") // Pass, Fail, Blocked, Not run
+  actual    String    @default("")
+  box       String    @default("") // JSON Box[] on the flow's picture, or on its own picture for a validation check
+  shot      Bytes? // a validation check's own picture, after pressing the save button
+  runAt     DateTime?
+
+  @@unique([flowId, no])
+}
+
+/// Step 6: where the API is and how to sign in to it. The header value is kept on this machine only and never shown again.
+model ApiTarget {
+  id         String  @id @default(cuid())
+  releaseId  String  @unique
+  release    Release @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  baseUrl    String  @default("")
+  authHeader String  @default("") // Authorization, X-API-Key, Cookie
+  authValue  String  @default("") // Bearer abc..., the key, the cookie
+  vars       String  @default("{}") // JSON {name: value} used as {{name}} in paths, queries and bodies
+  updatedAt  DateTime @updatedAt
+}
+
+/// One API from the list the user gives. Tests hang off it.
+model ApiEndpoint {
+  id        String    @id @default(cuid())
+  releaseId String
+  release   Release   @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  no        Int // 1, 2, 3: the number in its test IDs
+  method    String // GET, POST, PUT, PATCH, DELETE
+  path      String // /accounts/{id}, relative to the base URL unless it starts with http
+  name      String    @default("")
+  group     String    @default("") // folder or tag from the list
+  note      String    @default("") // what the list said about it: fields, rules, expected replies
+  sample    String    @default("") // sample body or query from the list
+  createdAt DateTime  @default(now())
+  tests     ApiTest[]
+
+  @@unique([releaseId, method, path])
+  @@unique([releaseId, no])
+}
+
+/// One request and what its reply should be. Written by Claude from the list, run by Playwright.
+model ApiTest {
+  id           String      @id @default(cuid())
+  releaseId    String
+  release      Release     @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  endpointId   String
+  endpoint     ApiEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  testId       String // API-003-02
+  kind         String // Positive, Negative, Edge
+  title        String
+  method       String
+  path         String
+  headers      String      @default("[]") // JSON [{name, value}]
+  query        String      @default("[]") // JSON [{name, value}]
+  body         String      @default("") // sent as is; JSON text usually
+  auth         Boolean     @default(true) // false sends the request without the sign-in header, for 401 checks
+  expectStatus String      @default("2xx") // 200, or 200,201, or 2xx
+  checks       String      @default("[]") // JSON [{path, op, value}] on the reply body or header:<name>
+  maxMs        Int         @default(0) // 0 = no time limit
+  needs        String      @default("") // variables the test needs that are not set yet
+  result       String      @default("Not run") // Pass, Fail, Blocked, Not run
+  actual       String      @default("")
+  request      String      @default("") // evidence: what was sent, sign-in header masked
+  response     String      @default("") // evidence: status, headers and the first part of the body
+  durationMs   Int         @default(0)
+  buildNo      String      @default("")
+  runAt        DateTime?
+  createdAt    DateTime    @default(now())
+
+  @@unique([releaseId, testId])
 }
 
 model Prototype {
@@ -50,7 +205,31 @@ model Prototype {
   matchProtoShot Bytes? // an HTML or SVG prototype as Chrome drew it
   matchDiffShot  Bytes? // the changed pixels in red, from pixelmatch
   matchAt      DateTime?
+  flowsFoundAt DateTime? // when the prototype was last clicked through for its flows; null = not yet
   triggers  UiTrigger[]
+  flows     UiFlow[]
+}
+
+/// A state of a prototype screen reached by clicks, such as the form New Account opens or a row's detail view, and its
+/// last comparison with the same clicks on the build.
+model UiFlow {
+  id          String    @id @default(cuid())
+  releaseId   String
+  release     Release   @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  prototypeId String
+  prototype   Prototype @relation(fields: [prototypeId], references: [id], onDelete: Cascade)
+  name        String // the clicks, e.g. "New Account" or "first row › Contacts"
+  steps       String    @default("[]") // JSON [{role, name}]; role "row" opens the first row of the list
+  result      String    @default("Not run") // Not run, Match, Mismatch, Blocked
+  summary     String    @default("")
+  diffs       String    @default("[]") // JSON ScreenDiff[]
+  buildNo     String    @default("")
+  protoShot   Bytes?
+  appShot     Bytes?
+  runAt       DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@unique([prototypeId, name])
 }
 
 model UiTrigger {
@@ -218,6 +397,7 @@ model Story {
   scripts            AutomationScript[]
   testData           TestDataRow[]
   criteriaResults    CriterionResult[]
+  uiFlows            StoryFlow[]
 
   @@unique([releaseId, storyId])
 }
@@ -287,6 +467,8 @@ model Build {
   healthOk   Boolean     @default(false) // Gate 3
   seedLoaded Boolean     @default(false) // Gate 3
   notes      String      @default("")
+  appMap     String      @default("") // JSON: the build's pages, found by following its navigation; user-story checks are written from it
+  appMapAt   DateTime?
   deployedAt DateTime    @default(now())
   executions Execution[]
   criteria   CriterionResult[]
@@ -324,6 +506,7 @@ model Execution {
   actual        String   @default("")
   evidenceUrl   String   @default("")
   notes         String   @default("")
+  shot          Bytes? // the screen at the end of the Playwright test, as evidence
   executedAt    DateTime @default(now())
 
   @@unique([buildId, testCaseId])

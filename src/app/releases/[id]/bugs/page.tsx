@@ -32,7 +32,7 @@ export default async function BugsPage({ params, searchParams }: { params: Promi
   return (
     <>
       <h1>{release.name}: bugs</h1>
-      <p className="muted">Step 7. Confirm failures as bugs, send them through your connector, and send the pass and fail report. Reproduce once by hand, then log with every template field. Each bug goes through the connection chosen below.</p>
+      <p className="muted">Step 9. Confirm failures as bugs, send them through your connector, and send the pass and fail report. Reproduce once by hand, then log with every template field. Each bug goes through the connection chosen below.</p>
       <ReleaseNav releaseId={id} active="bugs" />
       <Notice searchParams={sp} />
 

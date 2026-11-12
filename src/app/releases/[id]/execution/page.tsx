@@ -50,7 +50,7 @@ export default async function ExecutionPage({ params, searchParams }: { params: 
 
   return (
     <>
-      <h1>{release.name}: test execution</h1>
+      <h1>{release.name}: AC Check</h1>
       <p className="muted">Step 4. Enter the URL to test and the sign-in for it, then check every acceptance criterion at once, or choose a user story and check its criteria one by one. Chrome opens the URL, signs in when the app asks, and Claude confirms each criterion the positive way. A criterion can also be marked by hand.</p>
       <ReleaseNav releaseId={id} active="execution" />
       <Notice searchParams={sp} />

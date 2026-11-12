@@ -1,11 +1,12 @@
-export type Flow = "testcases" | "playwright" | "execution" | "ui" | "bugs";
+export type Flow = "testcases" | "playwright" | "execution" | "ui" | "api" | "bugs";
 
 export const FLOW_LABELS: Record<Flow, string> = {
-  testcases: "2. Test cases and test data",
-  execution: "4. Test execution",
-  ui: "5. UI testing",
-  playwright: "6. Playwright scripts",
-  bugs: "7. Bug logging",
+  testcases: "2. TC/TD",
+  execution: "4. AC Check",
+  playwright: "5. Playwright Test",
+  api: "6. API Test",
+  ui: "7. UI Testing",
+  bugs: "9. Bug logging",
 };
 
 /** Where a skill helps, and when to pick it. A skill listed with no flows needs tools this app does not give it. */
@@ -28,6 +29,7 @@ const KNOWN: Record<string, Fit> = {
 const KEYWORDS: [RegExp, Flow][] = [
   [/\bprd\b|product requirement|\btest cases?\b/i, "testcases"],
   [/\bplaywright\b|\bcypress\b/i, "playwright"],
+  [/\bapis?\b|\bpostman\b|\bnewman\b|\bopenapi\b|\bswagger\b|\brest\b/i, "api"],
   [/\bprototypes?\b|\bwireframes?\b/i, "ui"],
 ];
 

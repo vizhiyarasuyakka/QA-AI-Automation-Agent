@@ -5,10 +5,11 @@ import type { Browser } from "playwright-core";
 import { askBrowserAgent, askClaudeWithFiles } from "./claude";
 import { engineProblem, selectedEngine, skillFor } from "./engines";
 import { syncStages } from "./flows";
-import { launchJob, runningJob } from "./jobs";
+import { launchJob, runningJob, type JobCtx } from "./jobs";
 import { screenDifference } from "./pixels";
-import { captureApp, compareElements, DEFAULT_WIDTH, FIELD_KINDS, openChrome, renderPrototype, SCREEN_WIDTHS, type ScreenDiff, type Session } from "./screencompare";
+import { captureApp, compareElements, DEFAULT_WIDTH, FIELD_KINDS, openChrome, renderPrototype, SCREEN_WIDTHS, stepLabel, type PageContent, type ScreenDiff, type Session, type Step } from "./screencompare";
 import { accountLine, SIGN_IN_RULE } from "./testurl";
+import { findFlows, opened } from "./uiflows";
 import { prisma } from "./prisma";
 
 const TRIGGERS_PER_RUN = 10;
@@ -152,12 +153,114 @@ export async function saveMatch(p: MatchScreen, build: { number: string; envUrl:
   return result;
 }
 
+type FlowRow = { id: string; name: string; steps: string };
+type FlowOutcome = { result: "Match" | "Mismatch" | "Blocked"; summary: string; differences?: ScreenDiff[]; protoShot?: Uint8Array<ArrayBuffer> | null; appShot?: Uint8Array<ArrayBuffer> | null };
+const BUSY = "The build was still showing loading placeholders after 20 seconds, so some of what it lacks may only not have loaded. ";
+
+/** A flow's clicks as numbered steps, starting at the given number. */
+const clickLines = (steps: Step[], from: number) => steps.map((s, i) => `${from + i}. Click ${s.role === "row" ? "the first row of the list" : `the ${s.role} "${s.name}"`}`);
+
+/** Store one flow's comparison. A mismatch becomes a bug draft with the clicks to repeat; a match drops the pending draft. */
+async function saveFlow(f: FlowRow, p: MatchScreen, build: { number: string }, page: string, o: FlowOutcome) {
+  const kept = o.result === "Mismatch" ? o.differences ?? [] : [];
+  await prisma.uiFlow.update({ where: { id: f.id }, data: { result: o.result, summary: o.summary.slice(0, 2000), diffs: JSON.stringify(kept), buildNo: build.number, protoShot: o.protoShot ?? null, appShot: o.appShot ?? null, runAt: new Date() } });
+  const refKey = `flow:${f.id}`;
+  if (o.result !== "Mismatch") {
+    await prisma.bugCandidate.deleteMany({ where: { releaseId: p.releaseId, refKey, status: "Pending" } });
+    return o.result;
+  }
+  const steps = JSON.parse(f.steps) as Step[];
+  const data = {
+    source: "ui", module: p.module || p.screen, title: `${p.screen} › ${f.name}: does not match the prototype`.slice(0, 80), buildNo: build.number,
+    steps: [`1. Open ${page}`, ...clickLines(steps, 2), `${steps.length + 2}. Compare it with prototype ${p.fileName} after the same clicks`].join("\n"),
+    expected: `Looks the same as prototype ${p.fileName} after the same clicks, with the same fields`,
+    actual: kept.map(diffLine).join("\n") || o.summary,
+    // The prototype and the build after the same clicks, each difference boxed with its number from the list above.
+    evidenceUrl: o.appShot ? `/releases/${p.releaseId}/ui-testing/flow/${f.id}?view=evidence` : "",
+  };
+  await prisma.bugCandidate.upsert({ where: { releaseId_refKey: { releaseId: p.releaseId, refKey } }, update: { ...data, status: "Pending" }, create: { releaseId: p.releaseId, refKey, ...data } });
+  return o.result;
+}
+
+/** A screen that could not be compared leaves its flows unchecked: they read as Blocked, and their pending drafts go. */
+async function blockFlows(p: MatchScreen) {
+  const flows = await prisma.uiFlow.findMany({ where: { prototypeId: p.id }, select: { id: true } });
+  if (!flows.length) return;
+  await prisma.uiFlow.updateMany({ where: { prototypeId: p.id }, data: { result: "Blocked", summary: "The screen itself could not be compared, so its flows were not followed.", diffs: "[]", runAt: new Date() } });
+  await prisma.bugCandidate.deleteMany({ where: { releaseId: p.releaseId, refKey: { in: flows.map((f) => `flow:${f.id}`) }, status: "Pending" } });
+}
+
+
+/**
+ * A screen's flows on the build. The first time, the prototype is clicked through to find them. Each flow is then
+ * clicked on the prototype and on the build alike, from the screen's own page, and what it opened is compared field by
+ * field and text by text, leaving out what the screen already showed. A control the build lacks stops the flow and is
+ * itself the difference.
+ */
+async function checkFlows(browser: Browser, p: MatchScreen & { bytes: Uint8Array; mimeType: string; flowsFoundAt: Date | null }, build: { number: string; envUrl: string; loginUser: string; loginPassword: string }, job: JobCtx, at: { width: number; url: string; session: Session; protoStart: PageContent; appStart: PageContent; protoHeight: number; appHeight: number; only?: string[] }) {
+  let session = at.session;
+  const tally = { followed: 0, differ: 0 };
+  if (!p.flowsFoundAt) {
+    await job.set({ phase: `${p.screen}: finding its flows by clicking through the prototype, up to three minutes` });
+    const found = await findFlows(browser, p, at.width);
+    for (const f of found) {
+      const steps = JSON.stringify(f.steps);
+      await prisma.uiFlow.upsert({ where: { prototypeId_name: { prototypeId: p.id, name: f.name } }, update: { steps }, create: { releaseId: p.releaseId, prototypeId: p.id, name: f.name, steps } });
+    }
+    await prisma.prototype.update({ where: { id: p.id }, data: { flowsFoundAt: new Date() } });
+    job.log(`${p.screen}: ${found.length} flows found in the prototype${found.length ? `: ${found.map((f) => f.name).join(", ")}` : ""}.`);
+  }
+  const flows = await prisma.uiFlow.findMany({ where: { prototypeId: p.id, ...(at.only ? { id: { in: at.only } } : {}) }, orderBy: { createdAt: "asc" }, select: { id: true, name: true, steps: true } });
+  for (const [k, f] of flows.entries()) {
+    const steps = JSON.parse(f.steps) as Step[];
+    const save = (o: FlowOutcome) => saveFlow(f, p, build, at.url, o);
+    await job.set({ phase: `${p.screen} › ${f.name}, flow ${k + 1} of ${flows.length}` });
+    try {
+      // Both open at the height their screen was taken at, so the window grows only for a page longer than that, and a
+      // popover a resize would close stays open.
+      const proto = await renderPrototype(browser, p, at.width, steps, at.protoHeight);
+      if ("blocked" in proto || !proto.capture.content) {
+        await save({ result: "Blocked", summary: "blocked" in proto ? proto.blocked : "The prototype could not be read." });
+        continue;
+      }
+      const app = await captureApp(browser, { url: at.url, home: build.envUrl, screen: p.screen, view: { ...proto.view, height: at.appHeight }, withElements: true, account: { user: build.loginUser, password: build.loginPassword }, session, steps });
+      if ("blocked" in app) {
+        await save({ result: "Blocked", summary: app.blocked, protoShot: proto.capture.shot });
+        continue;
+      }
+      session = app.session;
+      tally.followed++;
+      let o: FlowOutcome;
+      if (app.missing !== undefined) {
+        const step = steps[app.missing];
+        const after = app.missing ? ` after ${steps.slice(0, app.missing).map(stepLabel).join(" › ")}` : "";
+        const what = step.role === "row" ? "list row to open" : `${step.role} named "${step.name}"`;
+        o = {
+          result: "Mismatch", protoShot: proto.capture.shot, appShot: app.capture.shot,
+          summary: `The build has no ${what}${after}, so this flow could not be followed. The build's picture shows where it stopped.`,
+          differences: [{ kind: "Missing control", element: stepLabel(step), prototype: `${step.role === "row" ? "a list row that opens" : `${step.role} "${step.name}"`}${after}`, build: "" }],
+        };
+      } else {
+        const compared = compareElements(opened(proto.capture.content, at.protoStart), opened(app.capture.content ?? { elements: [], fields: [] }, at.appStart));
+        o = { result: compared.differences.length ? "Mismatch" : "Match", summary: `${app.capture.loading ? BUSY : ""}${describeComparison(compared)}`, differences: compared.differences, protoShot: proto.capture.shot, appShot: app.capture.shot };
+      }
+      const result = await save(o);
+      if (result === "Mismatch") tally.differ++;
+      const missing = o.differences?.filter((d) => d.kind === "Missing field").length ?? 0;
+      job.log(`${p.screen} › ${f.name}: ${result}${o.differences?.length ? `, ${o.differences.length} differences` : ""}${missing ? `, ${missing} fields missing` : ""}.`);
+    } catch (e) {
+      job.log(`${p.screen} › ${f.name}: could not compare. ${(e instanceof Error ? e.message : String(e)).split("\n")[0]}`);
+    }
+  }
+  return { ...tally, session };
+}
+
 /**
  * Stage 5: each screen of the URL to test against its prototype, in a hidden Chrome on this machine. Playwright draws
  * both at the same size and pixelmatch counts the changed pixels; for an HTML prototype every form field and every text
- * is compared too. No Claude plan is used.
+ * is compared too, and with flows, every state the prototype's clicks open. No Claude plan is used.
  */
-export async function startUiMatch(releaseId: string, buildId: string, screenIds?: string[], width = DEFAULT_WIDTH): Promise<string | null> {
+export async function startUiMatch(releaseId: string, buildId: string, screenIds?: string[], width = DEFAULT_WIDTH, withFlows = true, flowIds?: string[]): Promise<string | null> {
   if (await runningJob(releaseId)) return "Another run is already in progress for this release.";
   const ready = await readyBuild(releaseId, buildId);
   if (typeof ready === "string") return ready;
@@ -178,11 +281,13 @@ export async function startUiMatch(releaseId: string, buildId: string, screenIds
         return "Failed";
       }
       let session: Session | undefined;
-      let done = 0, differ = 0, failed = 0;
+      let done = 0, differ = 0, failed = 0, followed = 0, flowsDiffer = 0;
       try {
         for (const p of protos) {
+          await ctx.set({ phase: `${p.screen}: comparing its list page in Chrome at ${viewWidth} wide` });
           const blocked = async (why: string, prototype: Uint8Array<ArrayBuffer> | null = null) => {
             await saveMatch(p, build, { result: "Blocked", url: "", summary: why, differences: [] }, null, null, false, { prototype });
+            if (withFlows) await blockFlows(p);
             ctx.log(`${p.screen}: Blocked. ${why}`);
           };
           try {
@@ -222,6 +327,12 @@ export async function startUiMatch(releaseId: string, buildId: string, screenIds
             if (result === "Mismatch") differ++;
             const missing = differences.filter((d) => d.kind === "Missing field").length, extra = differences.filter((d) => d.kind === "Extra field").length;
             ctx.log(`${p.screen}: ${result}, ${pixels.percent.toFixed(2)}% of pixels differ${differences.length ? `, ${differences.length} differences` : ""}${missing ? `, ${missing} fields missing` : ""}${extra ? `, ${extra} fields not in the prototype` : ""}.`);
+            if (withFlows && proto.capture.content && app.capture.content) {
+              const flows = await checkFlows(browser, p, build, ctx, { width: viewWidth, url: app.capture.url, session: app.session, protoStart: proto.capture.content, appStart: app.capture.content, protoHeight: pixels.prototypeSize.height, appHeight: pixels.shotSize.height, only: flowIds });
+              session = flows.session;
+              followed += flows.followed;
+              flowsDiffer += flows.differ;
+            }
           } catch (e) {
             failed++;
             ctx.log(`${p.screen}: could not compare. ${(e instanceof Error ? e.message : String(e)).split("\n")[0]}`);
@@ -232,7 +343,8 @@ export async function startUiMatch(releaseId: string, buildId: string, screenIds
       } finally {
         await browser.close().catch(() => {});
       }
-      ctx.log(`${done - failed} of ${protos.length} screens compared, ${differ} differ.${differ ? " Differences are in Bugs and reports as drafts." : ""}`);
+      const flowLine = withFlows ? ` ${followed} flows followed, ${flowsDiffer} differ.` : "";
+      ctx.log(`${done - failed} of ${protos.length} screens compared, ${differ} differ.${flowLine}${differ || flowsDiffer ? " Differences are in Bugs and reports as drafts." : ""}`);
       return failed === protos.length ? "Failed" : "Done";
     },
   });

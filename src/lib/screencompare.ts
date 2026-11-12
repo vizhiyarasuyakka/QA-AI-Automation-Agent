@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
 import { pictureSize } from "./pixels";
 
 /** A place on a page's screenshot, in pixels from its top left. */
@@ -148,7 +148,8 @@ const READ_PAGE = String.raw`(() => {
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     walker.currentNode = el;
     for (let n = walker.previousNode(), k = 0; n && k < 150; n = walker.previousNode(), k++) consider(n, false);
-    if (side) {
+    // Words to the right name a checkbox only when nothing above or to its left does, as a rating's value sits beside it.
+    if (side && !best.text) {
       let last = el;
       while (last.lastChild) last = last.lastChild;
       walker.currentNode = last;
@@ -283,7 +284,17 @@ function compareFields(prototype: PageField[], app: PageField[], shiftNear: Shif
     const { dx, dy } = shiftNear(a, "build");
     rows.push({ kind: "Extra field", element: fieldTitle(a), prototype: "", build: describe(a), at: { prototype: [shifted(boxOf(a), -dx, -dy)], build: [boxOf(a)] } });
   }
-  return { rows, covers, count };
+  // The same difference on several fields of one group, such as each star of a rating, is one row with all their boxes.
+  const merged = new Map<string, Row & { n: number }>();
+  for (const r of rows) {
+    const key = `${r.kind}|${r.element}|${r.prototype}|${r.build}`, seen = merged.get(key);
+    if (!seen) merged.set(key, { ...r, n: 1 });
+    else {
+      seen.n++;
+      seen.at = { prototype: [...(seen.at?.prototype ?? []), ...(r.at?.prototype ?? [])], build: [...(seen.at?.build ?? []), ...(r.at?.build ?? [])] };
+    }
+  }
+  return { rows: [...merged.values()].map(({ n, ...r }) => (n > 1 ? { ...r, element: `${r.element} (${n} fields)` } : r)), covers, count };
 }
 
 /**
@@ -407,7 +418,7 @@ export async function openChrome(): Promise<Browser> {
 const STILL_LOADING = String.raw`[...document.querySelectorAll('[aria-busy="true"], [class*="skeleton" i], [class*="shimmer" i], .animate-pulse, .animate-spin')].some((e) => { const r = e.getBoundingClientRect(); return r.width * r.height >= 200 && getComputedStyle(e).visibility !== "hidden"; })`;
 
 /** Waits, up to a limit, until the page has loaded its data and stopped drawing placeholders in its place. */
-async function settle(page: Page) {
+export async function settle(page: Page) {
   await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => {});
   await page.waitForFunction(LOADING_GONE, undefined, { timeout: 20_000 }).catch(() => {});
   await page.waitForFunction(`!(${STILL_LOADING})`, undefined, { timeout: 20_000 }).catch(() => {});
@@ -428,19 +439,24 @@ const FULL_HEIGHT = String.raw`(() => {
   return Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0, innerHeight + hidden);
 })()`;
 
-/** A screenshot of the page as it stands. A growing view is first made as tall as the page, so fixed side bars and inner scroll boxes show all of it. */
+/** Makes the window as tall as the page, so fixed side bars and inner scroll boxes show all of it. */
+export async function grow(page: Page, width: number) {
+  let height = page.viewportSize()?.height ?? VIEW_HEIGHT;
+  // Twice, because a box made taller can show more that loads in.
+  for (let i = 0; i < 2; i++) {
+    const next = Math.min(MAX_HEIGHT, Math.max(height, await page.evaluate<number>(FULL_HEIGHT)));
+    if (next === height) break;
+    height = next;
+    await page.setViewportSize({ width, height });
+    await page.waitForTimeout(600);
+  }
+}
+
+/** A screenshot of the page as it stands. A growing view is first made as tall as the page. */
 async function captureView(page: Page, view: View, withElements: boolean): Promise<Capture> {
   await settle(page);
   if (view.grow) {
-    let height = view.height;
-    // Twice, because a box made taller can show more that loads in.
-    for (let i = 0; i < 2; i++) {
-      const next = Math.min(MAX_HEIGHT, Math.max(height, await page.evaluate<number>(FULL_HEIGHT)));
-      if (next === height) break;
-      height = next;
-      await page.setViewportSize({ width: view.width, height });
-      await page.waitForTimeout(600);
-    }
+    await grow(page, view.width);
     await page.waitForFunction(`!(${STILL_LOADING})`, undefined, { timeout: 10_000 }).catch(() => {});
   }
   const shot = await page.screenshot({ animations: "disabled", caret: "hide" });
@@ -459,10 +475,12 @@ function kindOf(p: { fileName: string; mimeType: string }) {
 
 /**
  * The prototype as a picture, and the size to open the app at. A picture is used as it is; an HTML or SVG prototype is
- * drawn by Chrome at the chosen width, and an HTML one also gives its texts, styles and form fields.
+ * drawn by Chrome at the chosen width, and an HTML one also gives its texts, styles and form fields. With steps, the
+ * prototype is clicked through them first and the state they lead to is drawn.
  */
-export async function renderPrototype(browser: Browser, proto: { fileName: string; mimeType: string; bytes: Uint8Array }, width: number): Promise<{ capture: Capture; view: View; rendered: boolean } | { blocked: string }> {
+export async function renderPrototype(browser: Browser, proto: { fileName: string; mimeType: string; bytes: Uint8Array }, width: number, steps: Step[] = [], height = VIEW_HEIGHT): Promise<{ capture: Capture; view: View; rendered: boolean } | { blocked: string }> {
   const kind = kindOf(proto);
+  if (steps.length && kind !== "html") return { blocked: "Only an HTML prototype can be clicked through." };
   if (kind === "picture") {
     const size = await pictureSize(proto.bytes);
     if (!size) return { blocked: `${proto.fileName} is not a picture that can be read.` };
@@ -472,13 +490,19 @@ export async function renderPrototype(browser: Browser, proto: { fileName: strin
   }
   if (kind !== "html" && kind !== "svg") return { blocked: `A ${kind === "pdf" ? "PDF" : "file of this kind"} cannot be compared pixel by pixel. Upload the screen as PNG, JPG, WEBP or HTML.` };
   const dir = mkdtempSync(path.join(os.tmpdir(), "qa-proto-"));
-  const context = await browser.newContext({ viewport: { width, height: VIEW_HEIGHT }, deviceScaleFactor: 1, reducedMotion: "reduce" });
+  // A flow starts at the screen's full height: a popover that a window resize would close then stays open.
+  const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 1, reducedMotion: "reduce" });
   try {
     const file = path.join(dir, `prototype.${kind}`);
     writeFileSync(file, proto.bytes);
     const page = await context.newPage();
     await page.goto(pathToFileURL(file).href, { waitUntil: "load", timeout: 60_000 });
-    const view = { width, height: VIEW_HEIGHT, scale: 1, grow: true };
+    if (steps.length) {
+      await settle(page);
+      const at = (await follow(page, steps, true)).missing;
+      if (at !== null) return { blocked: `The prototype has no ${steps[at].role} named "${stepLabel(steps[at])}" to click any more.` };
+    }
+    const view = { width, height, scale: 1, grow: true };
     return { capture: await captureView(page, view, kind === "html"), view, rendered: true };
   } catch (e) {
     return { blocked: `Chrome could not draw the prototype. ${firstLine(e)}` };
@@ -504,7 +528,8 @@ async function signIn(page: Page, account: Account): Promise<boolean> {
     if (await submit.count()) await submit.click();
     else if (await named.count()) await named.click();
     else await password.press("Enter");
-    await passwordField(page).waitFor({ state: "hidden", timeout: 20_000 });
+    // A slow app can take most of a minute to sign in.
+    await passwordField(page).waitFor({ state: "hidden", timeout: 45_000 });
     await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => {});
     return true;
   } catch {
@@ -532,11 +557,99 @@ async function findScreen(page: Page, screen: string): Promise<boolean> {
   return false;
 }
 
+/** One click of a flow: a control by its role and the name a person reads, or "row" to open the first row of a list. */
+export type Step = { role: "button" | "link" | "tab" | "menuitem" | "row"; name: string };
+const ROLES = ["button", "link", "tab", "menuitem"] as const;
+/** How a step reads in a flow's name. */
+export const stepLabel = (s: Step) => (s.role === "row" ? "first row" : s.name);
+
+/**
+ * Runs in the page: marks the first row of a list and the place to click to open it. The row is a table body's first,
+ * or of rows marked as rows, the first shaped like most of them, as the heading row is not. The place is its first
+ * link, else its first words outside any control, past a checkbox column.
+ */
+const MARK_FIRST_ROW = String.raw`(() => {
+  for (const e of document.querySelectorAll("[data-qa-row], [data-qa-open]")) { e.removeAttribute("data-qa-row"); e.removeAttribute("data-qa-open"); }
+  const visible = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  let row = [...document.querySelectorAll("tbody tr")].find(visible);
+  if (!row) {
+    const rows = [...document.querySelectorAll("[role=row]")].filter((r) => visible(r) && !r.closest("thead") && !r.querySelector("[role=columnheader]"));
+    const shape = (r) => r.className + "|" + Math.round(r.getBoundingClientRect().height);
+    const counts = new Map();
+    for (const r of rows) counts.set(shape(r), (counts.get(shape(r)) || 0) + 1);
+    const most = Math.max(0, ...counts.values());
+    row = most >= 2 ? rows.find((r) => counts.get(shape(r)) === most) : null;
+  }
+  if (!row) return false;
+  row.setAttribute("data-qa-row", "");
+  const link = [...row.querySelectorAll("a[href]")].find(visible);
+  let open = link || null;
+  if (!open) {
+    for (const e of row.querySelectorAll("*")) {
+      if (e.closest("button, a, input, select, textarea, [role=button], [role=checkbox], [role=combobox]") || !visible(e)) continue;
+      let t = "";
+      for (const n of e.childNodes) if (n.nodeType === 3) t += n.textContent;
+      if (/\p{L}/u.test(t)) { open = e; break; }
+    }
+  }
+  (open || row).setAttribute("data-qa-open", "");
+  return true;
+})()`;
+
+/** Where what a click opened lives: a dialog, menu, list box or open panel. */
+const OPENED = "[role=dialog], [role=alertdialog], [role=menu], [role=listbox], [aria-modal=true], [data-radix-popper-content-wrapper], [data-state=open]";
+
+/**
+ * The control a step clicks: a visible one of its role and name, with the name in any case or under another role as a
+ * fallback, and last the words themselves, as an app can make plain text clickable. A match inside a menu or panel
+ * the last click opened wins over any other, as the next step belongs to it; a sort button of the same name behind it
+ * does not. For a row, the place that opens the list's first row. Null when there is none.
+ */
+export async function findControl(page: Page, step: Step): Promise<Locator | null> {
+  if (step.role === "row") return (await page.evaluate<boolean>(MARK_FIRST_ROW)) ? page.locator("[data-qa-open]").first() : null;
+  const loose = new RegExp(`^\\s*${escapeRegExp(step.name)}\\s*$`, "i");
+  const tries = [page.getByRole(step.role, { name: step.name, exact: true }), ...[step.role, ...ROLES.filter((r) => r !== step.role)].map((role) => page.getByRole(role, { name: loose })), page.getByText(loose)].map((m) => m.filter({ visible: true }));
+  for (const matches of tries) {
+    const n = Math.min(await matches.count(), 10);
+    for (let i = 0; i < n; i++) if (await matches.nth(i).evaluate((e, sel) => !!e.closest(sel), OPENED)) return matches.nth(i);
+  }
+  for (const matches of tries) if (await matches.count()) return matches.first();
+  return null;
+}
+
+/**
+ * Clicks a flow's steps in turn. Missing is the number of the first step the page has no control for, or null when
+ * every step was clicked; moved tells whether the last click led to another page rather than opening something on the
+ * same one. A prototype draws at once, so quick only pauses; the app is given time to load what it opens.
+ */
+export async function follow(page: Page, steps: Step[], quick = false): Promise<{ missing: number | null; moved: boolean }> {
+  let moved = true;
+  for (const [i, step] of steps.entries()) {
+    // The window is made as tall as a page before its first click, not after: what a click opens, such as a popover,
+    // closes when the window resizes, so it is never resized while something is open.
+    if (moved) await grow(page, page.viewportSize()?.width ?? DEFAULT_WIDTH);
+    const control = await findControl(page, step);
+    if (!control) return { missing: i, moved };
+    const from = page.url();
+    if (!(await control.click({ timeout: 10_000 }).then(() => true, () => false))) return { missing: i, moved };
+    if (quick) await page.waitForTimeout(700);
+    else {
+      // A step that opens another page changes the address a moment later; one that opens a dialog does not.
+      await page.waitForURL((u) => u.href !== from, { timeout: 2_500 }).catch(() => {});
+      await settle(page);
+    }
+    moved = page.url() !== from;
+  }
+  return { missing: null, moved };
+}
+
 /**
  * The app's screen at the prototype's size. Signs in with the test account when a password field shows, keeps that
- * session for the next screens, and finds the screen by its name when no page is given.
+ * session for the next screens, and finds the screen by its name when no page is given. With steps, clicks through
+ * them on the screen first; missing is the number of the step the app has no control for, and the screenshot shows
+ * where it stopped.
  */
-export async function captureApp(browser: Browser, opts: { url: string | null; home: string; screen: string; view: View; withElements: boolean; account: Account; session?: Session }): Promise<{ capture: Capture; session: Session } | { blocked: string }> {
+export async function captureApp(browser: Browser, opts: { url: string | null; home: string; screen: string; view: View; withElements: boolean; account: Account; session?: Session; steps?: Step[] }): Promise<{ capture: Capture; session: Session; missing?: number } | { blocked: string }> {
   const context = await browser.newContext({ viewport: { width: opts.view.width, height: opts.view.height }, deviceScaleFactor: opts.view.scale, reducedMotion: "reduce", ignoreHTTPSErrors: true, storageState: opts.session });
   try {
     const page = await context.newPage();
@@ -576,12 +689,68 @@ export async function captureApp(browser: Browser, opts: { url: string | null; h
       if (problem) return { blocked: problem };
       if (!opts.url && !(await findScreen(page, opts.screen))) return { blocked: `No link named like ${opts.screen} was found on ${page.url()}. Type the page for this screen, for example /accounts.` };
       if (new URL(page.url()).origin !== new URL(opts.home).origin) return { blocked: `The page moved to ${new URL(page.url()).origin}, which is not the URL to test.` };
-      const capture = await captureView(page, opts.view, opts.withElements);
-      if (!(await passwordField(page).count())) return { capture, session: await context.storageState() };
+      const steps = opts.steps ?? [];
+      const { missing, moved } = steps.length ? await follow(page, steps) : { missing: null, moved: true };
+      if (new URL(page.url()).origin !== new URL(opts.home).origin) return { blocked: `The flow left the URL to test for ${new URL(page.url()).origin}.` };
+      // What the last click opened on the same page, such as a popover, can make the page taller and closes when the
+      // window resizes, so the window keeps the full height it was given before that click.
+      const view = moved ? opts.view : { ...opts.view, grow: false };
+      const capture = await captureView(page, view, opts.withElements);
+      if (!(await passwordField(page).count())) return { capture, session: await context.storageState(), ...(missing === null ? {} : { missing }) };
       // The sign-in page can come up after the screen started to draw. It is never compared as the screen: sign in once more and take it again.
       if (round || signedIn) return { blocked: "The app showed its sign-in page instead of the screen." };
     }
   } finally {
     await context.close().catch(() => {});
   }
+}
+
+/** What READ_PAGE reads: every text and form field shown, with its place. */
+export const readPage = (page: Page) => page.evaluate<PageContent>(READ_PAGE);
+/** True when the app is showing its sign-in page. */
+export const askedToSignIn = async (page: Page) => (await passwordField(page).count()) > 0;
+
+/**
+ * The app open in a window of its own, signed in, for checks that act on it. With no page given, the screen is found
+ * by its name from wherever signing in lands, and with no name either, the page signing in lands on is kept. The
+ * caller closes the context.
+ */
+export async function openApp(browser: Browser, opts: { url: string | null; home: string; screen: string; width: number; account: Account; session?: Session }): Promise<{ page: Page; context: BrowserContext; session: Session } | { blocked: string }> {
+  const context = await browser.newContext({ viewport: { width: opts.width, height: VIEW_HEIGHT }, reducedMotion: "reduce", ignoreHTTPSErrors: true, storageState: opts.session });
+  const page = await context.newPage();
+  const fail = async (blocked: string) => {
+    await context.close().catch(() => {});
+    return { blocked };
+  };
+  const target = opts.url ?? opts.home;
+  // Not the load event: an app with long-lived connections fires it late or never. Settling waits for the page's own loaders instead.
+  const open = async () => {
+    try {
+      await page.goto(target, { waitUntil: "commit", timeout: 45_000 });
+      await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => {});
+      for (let i = 0, url = ""; i < 3 && url !== page.url(); i++) {
+        url = page.url();
+        await settle(page);
+      }
+      return null;
+    } catch (e) {
+      return `Could not open ${target}. ${firstLine(e)}`;
+    }
+  };
+  let problem = await open();
+  if (!problem && (await passwordField(page).count())) {
+    let signedIn = !!opts.account.user && !!opts.account.password && (await signIn(page, opts.account));
+    // A slow sign-in gets a second try from a fresh sign-in page; an app that finished signing in late shows no sign-in page then.
+    if (!signedIn && opts.account.user && opts.account.password && !(await open())) signedIn = !(await passwordField(page).count()) || (await signIn(page, opts.account));
+    if (!opts.account.user || !opts.account.password) problem = "The app asks to sign in. Save a test account at the top of this step.";
+    else if (!signedIn) problem = "Signing in with the saved test account did not work: the sign-in page is still showing.";
+    else if (opts.url) {
+      problem = await open();
+      if (!problem && (await passwordField(page).count())) problem = "The app asked to sign in again after signing in with the saved test account.";
+    } else await settle(page);
+  }
+  if (problem) return fail(problem);
+  if (!opts.url && opts.screen && !(await findScreen(page, opts.screen))) return fail(`No link named like ${opts.screen} was found on ${page.url()}. Type the page for this flow, for example /boq.`);
+  if (new URL(page.url()).origin !== new URL(opts.home).origin) return fail(`The page moved to ${new URL(page.url()).origin}, which is not the URL to test.`);
+  return { page, context, session: await context.storageState() };
 }

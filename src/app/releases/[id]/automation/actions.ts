@@ -6,21 +6,22 @@ import { redirect } from "next/navigation";
 
 const s = (fd: FormData, k: string) => String(fd.get(k) ?? "").trim();
 
+/** Back to the page, keeping the chosen story open. */
+const back = (releaseId: string, story: string, message: string) => `/releases/${releaseId}/automation?${story ? `story=${encodeURIComponent(story)}&` : ""}${message}`;
+
+/** Writes the scripts for every story, or for the one chosen. */
 export async function triggerScripts(formData: FormData) {
-  const releaseId = s(formData, "releaseId");
-  const err = await startPlaywright(releaseId);
-  const back = `/releases/${releaseId}/automation`;
-  if (err) redirect(`${back}?err=${encodeURIComponent(err)}`);
-  redirect(`${back}?info=${encodeURIComponent("Script generation started")}`);
+  const releaseId = s(formData, "releaseId"), story = s(formData, "story");
+  const err = await startPlaywright(releaseId, story ? [story] : undefined);
+  redirect(back(releaseId, story, err ? `err=${encodeURIComponent(err)}` : `info=${encodeURIComponent(story ? "Writing this story's scripts" : "Script generation started")}`));
 }
 
-/** Runs every stored script here, on the URL to test. */
+/** Runs the stored scripts here, on the URL to test: all of them, one story's, or one test case. */
 export async function runScripts(formData: FormData) {
-  const releaseId = s(formData, "releaseId");
-  const err = await startScriptRun(releaseId);
-  const back = `/releases/${releaseId}/automation`;
-  if (err) redirect(`${back}?err=${encodeURIComponent(err)}`);
-  redirect(`${back}?info=${encodeURIComponent("Running the scripts")}`);
+  const releaseId = s(formData, "releaseId"), story = s(formData, "story"), tcId = s(formData, "tcId");
+  const scope = s(formData, "scope");
+  const err = await startScriptRun(releaseId, scope === "case" ? { storyId: story || undefined, tcId } : scope === "story" ? { storyId: story } : {});
+  redirect(back(releaseId, story, err ? `err=${encodeURIComponent(err)}` : `info=${encodeURIComponent(scope === "case" ? `Running ${tcId}` : scope === "story" ? "Running this story's scripts" : "Running the scripts")}`));
 }
 
 export async function saveScript(formData: FormData) {

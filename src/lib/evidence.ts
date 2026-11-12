@@ -69,6 +69,24 @@ export async function evidenceCrop(shot: Uint8Array, diffs: ScreenDiff[], index:
   return new Uint8Array(await sharp(area).composite([{ input: drawn(w, h, marks, left, top) }]).png().toBuffer());
 }
 
+const png = (bytes: Uint8Array) => new Response(new Uint8Array(bytes), { headers: { "Content-Type": "image/png", "Cache-Control": "no-store" } });
+const none = (why = "No screenshot") => new Response(why, { status: 404 });
+
+/**
+ * Answers a request for a comparison's pictures. view=app (the default), prototype or diff gives that picture; with n,
+ * difference n up close on the prototype or the app; view=evidence gives both side by side with every difference
+ * boxed and numbered.
+ */
+export async function pictureResponse(query: URLSearchParams, pictures: { prototype: Uint8Array | null; build: Uint8Array | null; diff?: Uint8Array | null }, diffs: ScreenDiff[]): Promise<Response> {
+  const view = query.get("view"), n = query.get("n");
+  if (view === "evidence") return pictures.build ? png(await evidenceSheet(pictures.prototype, pictures.build, diffs)) : none();
+  const bytes = view === "prototype" ? pictures.prototype : view === "diff" ? pictures.diff : pictures.build;
+  if (!bytes) return none();
+  if (n === null || view === "diff") return png(bytes);
+  const crop = await evidenceCrop(bytes, diffs, Number(n), view === "prototype" ? "prototype" : "build");
+  return crop ? png(crop) : none("This difference has no place on this screenshot");
+}
+
 /**
  * A whole screen's evidence: the prototype and the build side by side, every difference boxed and numbered as in the
  * list of differences. Without a prototype picture, the build alone.

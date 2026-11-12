@@ -2,18 +2,20 @@ import Link from "next/link";
 import { flowStates, type FlowState } from "@/lib/flows";
 import { prisma } from "@/lib/prisma";
 
-type Key = "board" | "documents" | "stories" | "review" | "automation" | "execution" | "ui" | "bugs" | "signoff";
+type Key = "board" | "documents" | "stories" | "review" | "automation" | "execution" | "ui" | "api" | "security" | "bugs" | "signoff";
 
 /** The release's route sheet: each workflow step in order, with where it stands. */
 export async function ReleaseNav({ releaseId, active }: { releaseId: string; active: Key }) {
   const [f, release] = await Promise.all([flowStates(releaseId), prisma.release.findUnique({ where: { id: releaseId }, select: { name: true, status: true } })]);
   const steps: [string, string, Key, FlowState][] = [
-    [`/releases/${releaseId}/documents`, "PRD and documents", "documents", f.files],
-    [`/releases/${releaseId}/stories`, "Test cases", "stories", f.testcases],
+    [`/releases/${releaseId}/documents`, "Requirement docs", "documents", f.files],
+    [`/releases/${releaseId}/stories`, "TC/TD: test cases and test data", "stories", f.testcases],
     [`/releases/${releaseId}/review`, "Test case review", "review", f.review],
-    [`/releases/${releaseId}/execution`, "Test execution", "execution", f.execution],
-    [`/releases/${releaseId}/ui-testing`, "UI testing", "ui", f.ui],
-    [`/releases/${releaseId}/automation`, "Playwright scripts", "automation", f.playwright],
+    [`/releases/${releaseId}/execution`, "AC Check", "execution", f.execution],
+    [`/releases/${releaseId}/automation`, "Playwright Test", "automation", f.playwright],
+    [`/releases/${releaseId}/api-testing`, "API Test", "api", f.api],
+    [`/releases/${releaseId}/ui-testing`, "UI Testing", "ui", f.ui],
+    [`/releases/${releaseId}/security`, "Security Testing", "security", f.security],
     [`/releases/${releaseId}/bugs`, "Bugs and reports", "bugs", f.bugs],
   ];
   return (
