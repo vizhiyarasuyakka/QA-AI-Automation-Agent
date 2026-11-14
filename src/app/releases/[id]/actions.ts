@@ -1,20 +1,28 @@
 "use server";
 
+import { audit, requireRole } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { evaluateGates, gateForStage } from "@/lib/workflow";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+
+/** Stages 1 to 12 follow their pages and the gates; only stage 13 (post-release monitoring) is set by a person. */
+const MANUAL_STAGES = new Set([13]);
 
 export async function setStageStatus(formData: FormData) {
   const releaseId = String(formData.get("releaseId"));
   const stageNo = Number(formData.get("stageNo"));
   const status = String(formData.get("status"));
   const note = String(formData.get("note") ?? "");
+  if (!MANUAL_STAGES.has(stageNo)) redirect(`/releases/${releaseId}?err=${encodeURIComponent(`Stage ${stageNo} follows its page and cannot be set by hand.`)}`);
+  if (!["Pending", "In progress", "Done", "Failed"].includes(status)) redirect(`/releases/${releaseId}?err=${encodeURIComponent("Choose a status.")}`);
+  const user = await requireRole("QA Engineer", "update a stage");
   const gateNo = gateForStage(stageNo);
   if (status === "Done" && gateNo) {
     const gate = (await evaluateGates(releaseId))[gateNo - 1];
     if (!gate.met) redirect(`/releases/${releaseId}?err=${encodeURIComponent(`Stage ${stageNo} cannot be Done: Gate ${gateNo} is not met (${gate.reasons.slice(0, 2).join("; ")}).`)}`);
   }
+  await audit(user, "stage.set", { releaseId, target: `stage ${stageNo}`, detail: `${status}${note ? `: ${note}` : ""}` });
   await prisma.stageStatus.upsert({
     where: { releaseId_stageNo: { releaseId, stageNo } },
     update: { status, note },

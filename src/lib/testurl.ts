@@ -1,4 +1,6 @@
 import { prisma } from "./prisma";
+import { encryptSecret } from "./secrets";
+import { targetProblem } from "./targets";
 
 const BAD_URL = "Enter the full address to test, starting with https://";
 
@@ -16,6 +18,8 @@ export function checkTestUrl(raw: string): string | null {
 export async function setTestUrl(releaseId: string, raw: string, login?: { user: string; password: string }): Promise<{ error: string } | { build: { id: string; envUrl: string } }> {
   const url = checkTestUrl(raw);
   if (!url) return { error: BAD_URL };
+  const refused = await targetProblem(url);
+  if (refused) return { error: refused };
   const latest = await prisma.build.findFirst({ where: { releaseId }, orderBy: { deployedAt: "desc" } });
   let build = latest;
   if (!build) {
@@ -30,7 +34,7 @@ export async function setTestUrl(releaseId: string, raw: string, login?: { user:
   // A blank user name forgets the sign-in; a blank password keeps the one already saved.
   if (login) {
     const user = login.user.trim();
-    const data = !user ? { loginUser: "", loginPassword: "" } : login.password ? { loginUser: user, loginPassword: login.password } : { loginUser: user };
+    const data = !user ? { loginUser: "", loginPassword: "" } : login.password ? { loginUser: user, loginPassword: encryptSecret(login.password) } : { loginUser: user };
     build = await prisma.build.update({ where: { id: build.id }, data });
   }
   await planCases(releaseId);

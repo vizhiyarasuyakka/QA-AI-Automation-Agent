@@ -7,6 +7,38 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/// A person who signs in. Roles, from least to most: Viewer, QA Engineer, QA Lead, Admin.
+model User {
+  id             String     @id @default(cuid())
+  email          String     @unique
+  name           String
+  role           String     @default("QA Engineer") // Admin, QA Lead, QA Engineer, Viewer
+  passwordHash   String // "" for single sign-on users: they cannot sign in with a password
+  oidcSubject    String?    @unique // "<issuer>|<oid or sub>", bound at the first single sign-on
+  active         Boolean    @default(true)
+  sessionVersion Int        @default(1) // raised on deactivation or password reset, so older sessions stop working
+  lastLoginAt    DateTime?
+  createdAt      DateTime   @default(now())
+  signoffs       Signoff[]
+  audits         AuditLog[]
+}
+
+/// Who did what and when. Written for sign-in, sign-off, release status, deletions, script edits, settings and user changes.
+model AuditLog {
+  id        String   @id @default(cuid())
+  at        DateTime @default(now())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userEmail String   @default("") // kept as written, so the entry still reads after the user is removed
+  action    String // e.g. signoff.save, release.delete, script.save, user.create, login.fail
+  releaseId String?
+  target    String   @default("")
+  detail    String   @default("")
+
+  @@index([at])
+  @@index([releaseId])
+}
+
 model Release {
   id          String          @id @default(cuid())
   name        String
@@ -129,7 +161,7 @@ model ApiTarget {
   release    Release @relation(fields: [releaseId], references: [id], onDelete: Cascade)
   baseUrl    String  @default("")
   authHeader String  @default("") // Authorization, X-API-Key, Cookie
-  authValue  String  @default("") // Bearer abc..., the key, the cookie
+  authValue  String  @default("") // Bearer abc..., the key, the cookie; encrypted at rest like Build.loginPassword
   vars       String  @default("{}") // JSON {name: value} used as {{name}} in paths, queries and bodies
   updatedAt  DateTime @updatedAt
 }
@@ -332,10 +364,11 @@ model AutomationScript {
   fileName    String
   code        String
   tcIds       String   @default("")
-  status      String   @default("Ready") // Ready, Syntax error, Unchecked
+  status      String   @default("Ready") // Ready, Syntax error, Blocked by policy, Unchecked
   error       String   @default("")
   engine      String   @default("")
   edited      Boolean  @default(false)
+  editedBy    String   @default("") // who last saved the code by hand
   generatedAt DateTime @default(now())
 
   @@unique([storyRefId, part])
@@ -373,6 +406,32 @@ model GenerationJob {
   log          String    @default("")
   startedAt    DateTime  @default(now())
   finishedAt   DateTime?
+  heartbeatAt     DateTime? // written every 15 s while the job runs, so any server can tell a live job from one a restart orphaned
+  cancelRequested Boolean   @default(false)
+  cancelledBy     String    @default("")
+}
+
+/// One request to a model (Claude API, Claude Code, Codex): what it cost and whether it worked.
+model AiCall {
+  id           String   @id @default(cuid())
+  at           DateTime @default(now())
+  releaseId    String?
+  jobId        String?
+  kind         String   @default("") // the job kind: testcases, playwright, api-tests, ...
+  via          String // api, cli, cli-files, browser, chrome, codex
+  model        String   @default("")
+  skill        String   @default("")
+  ok           Boolean
+  error        String   @default("")
+  ms           Int
+  inputChars   Int      @default(0)
+  outputChars  Int      @default(0)
+  inputTokens  Int      @default(0)
+  outputTokens Int      @default(0)
+  costUsd      Float    @default(0)
+
+  @@index([at])
+  @@index([releaseId])
 }
 
 model Story {
@@ -463,7 +522,7 @@ model Build {
   number     String // 1.24.3
   envUrl     String      @default("")
   loginUser     String   @default("") // the test account Claude signs in with in step 4
-  loginPassword String   @default("") // kept on this machine only and never shown again
+  loginPassword String   @default("") // encrypted at rest (enc:v1:...), decrypted on read by src/lib/prisma.ts; never shown again
   healthOk   Boolean     @default(false) // Gate 3
   seedLoaded Boolean     @default(false) // Gate 3
   notes      String      @default("")
@@ -595,9 +654,12 @@ model Signoff {
   scopeTested    String   @default("")
   scopeNotTested String   @default("")
   risks          String   @default("")
-  signedBy       String   @default("")
+  signedBy       String   @default("") // the signed-in user's name and email, never typed
+  signedById     String?
+  signedByUser   User?    @relation(fields: [signedById], references: [id], onDelete: SetNull)
   buildNo        String   @default("")
   metricsJson    String   @default("{}")
+  snapshotHash   String   @default("") // SHA-256 of what was signed, so a later change to the row shows
   signedAt       DateTime @default(now())
 }
 

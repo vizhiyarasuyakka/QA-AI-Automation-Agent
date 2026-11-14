@@ -7,6 +7,8 @@ import { askEngine, engineProblem, selectedEngine } from "./engines";
 import { syncStages } from "./flows";
 import { launchJob, runningJob, type JobCtx } from "./jobs";
 import { prisma } from "./prisma";
+import { encryptSecret } from "./secrets";
+import { targetProblem } from "./targets";
 import { firstLine, flattenPlaywright } from "../app/api/import/_shared";
 
 /*
@@ -207,6 +209,7 @@ export async function addEndpoints(releaseId: string, text: string): Promise<{ a
 export async function saveTarget(releaseId: string, input: { baseUrl: string; authHeader: string; authValue: string; vars: string }): Promise<string | null> {
   const baseUrl = input.baseUrl.trim();
   if (baseUrl) { try { if (!["http:", "https:"].includes(new URL(baseUrl).protocol)) throw new Error(); } catch { return "Enter the API's base address in full, starting with http:// or https://."; } }
+  if (baseUrl) { const refused = await targetProblem(baseUrl, "The API base address"); if (refused) return refused; }
   let vars: Record<string, string> = {};
   if (input.vars.trim()) {
     try {
@@ -217,7 +220,7 @@ export async function saveTarget(releaseId: string, input: { baseUrl: string; au
   }
   const have = await prisma.apiTarget.findUnique({ where: { releaseId } });
   const authHeader = input.authHeader.trim();
-  const authValue = !authHeader ? "" : input.authValue || have?.authValue || "";
+  const authValue = encryptSecret(!authHeader ? "" : input.authValue || have?.authValue || "");
   await prisma.apiTarget.upsert({ where: { releaseId }, update: { baseUrl, authHeader, authValue, vars: JSON.stringify(vars) }, create: { releaseId, baseUrl, authHeader, authValue, vars: JSON.stringify(vars) } });
   await syncStages(releaseId);
   return null;

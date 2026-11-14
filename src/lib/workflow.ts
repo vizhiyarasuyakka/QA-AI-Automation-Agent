@@ -1,14 +1,9 @@
+import { cache } from "react";
 import { coverageGaps } from "./coverage";
+import { securityVerdict, signoffReasons, THRESHOLDS, untriagedFailures } from "./gates";
 import { prisma } from "./prisma";
 
-export const THRESHOLDS = {
-  P1_PASS_RATE: 0.95,
-  AUTOMATION_STABILITY: 0.95,
-  AUTOMATION_COVERAGE: 0.8,
-  REOPEN_RATE_MAX: 0.1,
-  MTTF_HIGH_HOURS: 24,
-  STABILITY_WINDOW: 10,
-};
+export { THRESHOLDS };
 
 export type StageDef = {
   no: number;
@@ -86,28 +81,50 @@ export type Metrics = {
   escapes: number;
   escapesCritical: number;
   nfrGreen: boolean;
+  securityNote: string;
+  /** Failures from AC Check, API Test and UI Testing whose draft is neither logged nor dismissed. */
+  untriaged: { ac: number; api: number; ui: number };
+  /** Pending drafts from elsewhere: failed test cases, security findings. */
+  otherPendingDrafts: number;
 };
 
 export type GateResult = { no: number; name: string; met: boolean; reasons: string[] };
 
-export async function computeMetrics(releaseId: string): Promise<Metrics> {
-  const [stories, builds, bugs, runs, escapes, stageRows] = await Promise.all([
+/**
+ * One computation per release per page render: the board, the release nav and syncStages all ask for it, and
+ * React's cache shares the answer within that render. Outside a render (server actions, jobs) it runs every time.
+ */
+export const computeMetrics = cache((releaseId: string) => computeMetricsNow(releaseId));
+
+async function computeMetricsNow(releaseId: string): Promise<Metrics> {
+  const [stories, latest, bugs, runs, escapes, drafts, scan, apiFails, storyFails, protoFails, flowFails, triggerFails] = await Promise.all([
     prisma.story.findMany({ where: { releaseId }, include: { testCases: true, coverage: true } }),
-    prisma.build.findMany({ where: { releaseId }, orderBy: { deployedAt: "desc" }, include: { executions: { include: { testCase: true } } } }),
+    prisma.build.findFirst({ where: { releaseId }, orderBy: { deployedAt: "desc" }, select: { id: true, number: true } }),
     prisma.bug.findMany({ where: { releaseId } }),
     prisma.automationRun.findMany({ where: { releaseId, source: "playwright" }, orderBy: { ranAt: "desc" }, take: THRESHOLDS.STABILITY_WINDOW }),
     prisma.escape.findMany({ where: { releaseId } }),
-    prisma.stageStatus.findMany({ where: { releaseId } }),
+    prisma.bugCandidate.findMany({ where: { releaseId }, select: { refKey: true, status: true } }),
+    prisma.securityScan.findFirst({ where: { releaseId }, orderBy: { startedAt: "desc" }, select: { status: true, buildNo: true, findings: { where: { result: "Fail", risk: { in: ["High", "Medium"] } }, select: { id: true } } } }),
+    prisma.apiTest.findMany({ where: { releaseId, result: "Fail" }, select: { id: true } }),
+    prisma.storyFlow.findMany({ where: { releaseId, result: "Mismatch" }, select: { id: true } }),
+    prisma.prototype.findMany({ where: { releaseId, matchResult: "Mismatch" }, select: { id: true } }),
+    prisma.uiFlow.findMany({ where: { releaseId, result: "Mismatch" }, select: { id: true } }),
+    prisma.uiTrigger.findMany({ where: { releaseId, result: "Fail" }, select: { id: true } }),
   ]);
+  // Only the latest build counts, and its screenshots are never loaded here: metrics run on every page.
+  const [execs, acFails] = latest
+    ? await Promise.all([
+        prisma.execution.findMany({ where: { buildId: latest.id }, select: { result: true, executedBy: true, humanVerified: true, testCase: { select: { priority: true, smoke: true } } } }),
+        prisma.criterionResult.findMany({ where: { buildId: latest.id, result: "Fail" }, select: { id: true } }),
+      ])
+    : [[], []];
 
   const cases = stories.flatMap((s) => s.testCases);
   const storiesCovered = stories.filter((s) => s.testCases.length > 0 && !coverageGaps(s.acceptanceCriteria, s.coverage, s.testCases).length).length;
   const casesReviewed = cases.filter((c) => c.reviewed).length;
   const casesApproved = cases.filter((c) => c.approved).length;
 
-  const latest = builds[0];
   // Every case counts; nothing is approved first.
-  const execs = latest ? latest.executions : [];
   const planned = cases.length;
   const byResult = (r: string) => execs.filter((e) => e.result === r).length;
   const counts = { pass: byResult("Pass"), fail: byResult("Fail"), blocked: byResult("Blocked"), notRun: Math.max(0, planned - execs.filter((e) => e.result !== "Not run").length) };
@@ -134,8 +151,16 @@ export async function computeMetrics(releaseId: string): Promise<Metrics> {
   const runTotal = runs.reduce((a, r) => a + r.total, 0);
   const runPassed = runs.reduce((a, r) => a + r.passed, 0);
 
-  // Security green: stage 9 Done, a scan with nothing High or Medium open.
-  const nfr = stageRows.find((s) => s.stageNo === 9);
+  // Security green comes from the latest scan itself, never from a stage status that a page visit or a person sets.
+  const security = securityVerdict(scan ? { status: scan.status, buildNo: scan.buildNo, highOrMedium: scan.findings.length } : null, latest?.number ?? null);
+  const triage = untriagedFailures(
+    {
+      ac: acFails.map((r) => `criterion:${r.id}`),
+      api: apiFails.map((t) => `api:${t.id}`),
+      ui: [...storyFails.map((f) => `story:${f.id}`), ...protoFails.map((p) => `match:${p.id}`), ...flowFails.map((f) => `flow:${f.id}`), ...triggerFails.map((t) => `trigger:${t.id}`)],
+    },
+    drafts,
+  );
 
   return {
     stories: stories.length,
@@ -171,7 +196,10 @@ export async function computeMetrics(releaseId: string): Promise<Metrics> {
     runsConsidered: runs.length,
     escapes: escapes.length,
     escapesCritical: escapes.filter((e) => e.severity === "Critical").length,
-    nfrGreen: !!nfr && nfr.status === "Done",
+    nfrGreen: security.green,
+    securityNote: security.note,
+    untriaged: triage.untriaged,
+    otherPendingDrafts: triage.otherPendingDrafts,
   };
 }
 
@@ -201,15 +229,7 @@ export async function evaluateGates(releaseId: string, m?: Metrics): Promise<Gat
   const g4: string[] = [];
   if (metrics.smokeTotal && metrics.smokePass < metrics.smokeTotal) g4.push(`smoke ${metrics.smokePass}/${metrics.smokeTotal} passed`);
 
-  const g5: string[] = [];
-  ([["Gate 1", g1], ["Gate 2", g2], ["Gate 3", g3], ["Gate 4", g4]] as const).forEach(([name, reasons]) => { if (reasons.length) g5.push(`${name} not met`); });
-  if (metrics.openBySeverity.Critical) g5.push(`${metrics.openBySeverity.Critical} Critical open`);
-  if (metrics.openHighWithoutWorkaround) g5.push(`${metrics.openHighWithoutWorkaround} High open without workaround`);
-  if (metrics.passRate.P1 < THRESHOLDS.P1_PASS_RATE) g5.push(`P1 pass rate ${(metrics.passRate.P1 * 100).toFixed(0)}% below ${THRESHOLDS.P1_PASS_RATE * 100}%`);
-  if (metrics.progress < 1) g5.push(`execution ${(metrics.progress * 100).toFixed(0)}% of planned`);
-  if (metrics.humanVerifiedRate < 1) g5.push(`${metrics.p1AiExecuted - metrics.p1HumanVerified} AI-executed P1 cases not human-verified`);
-  if (!metrics.nfrGreen) g5.push("security testing not green");
-  if (metrics.runsConsidered && metrics.automationStability < THRESHOLDS.AUTOMATION_STABILITY) g5.push(`automation stability ${(metrics.automationStability * 100).toFixed(0)}%`);
+  const g5 = signoffReasons(metrics, [{ name: "Gate 1", met: !g1.length }, { name: "Gate 2", met: !g2.length }, { name: "Gate 3", met: !g3.length }, { name: "Gate 4", met: !g4.length }]);
 
   return [
     { no: 1, name: "Intake", met: !g1.length, reasons: g1 },

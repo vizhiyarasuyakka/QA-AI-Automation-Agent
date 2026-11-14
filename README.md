@@ -14,14 +14,33 @@ Stack: Next.js 15 (App Router, server actions), Prisma 6, PostgreSQL, Claude API
    - `DATABASE_URL`: leave as is if you use the docker-compose database.
    - `ANTHROPIC_API_KEY`: optional. When empty, generation runs through this machine's Claude Code login, so sign in to Claude Code first. Set a key for any shared or hosted deployment, because a login belongs to one person's machine.
    - `BUG_WEBHOOK_URL` and `BUG_WEBHOOK_TOKEN`: optional, your in-house QA app endpoint. Can also be set later in Settings inside the app.
-3. Start the database and the app:
+3. Start the database, create the keys and the first Admin, and start the app:
 
        docker compose up -d
        npm install
        npm run db:push
+       npm run keys -- --write
+       npm run user:create -- --email you@company.com --name "Your Name" --role Admin
        npm run dev
 
-   Open http://localhost:3100.
+   Open http://localhost:3100 and sign in. `npm run keys -- --write` adds `AUTH_SECRET` and `SECRETS_KEY` to `.env` and never replaces existing ones; back up `SECRETS_KEY`, because stored passwords and tokens cannot be read without it. If the database already holds test-account passwords or tokens from before encryption, run `npm run secrets:encrypt` once.
+
+## Sign-in, roles and the audit log
+
+Every page, server action and route needs a signed-in user; only `/login` and the CI imports (which carry `X-Import-Token`) are open. Accounts are added by an Admin in **Users**, or from the server with `npm run user:create`.
+
+| Role | Can |
+| --- | --- |
+| Admin | Everything, plus users, integrations (webhook, MCP, import token) and the audit log |
+| QA Lead | Sign off, set the release status, create and delete releases, delete bugs, edit Playwright scripts, choose the AI connection |
+| QA Engineer | Upload, generate, review, run tests, log, update and dismiss bugs |
+| Viewer | Read only; every change is refused |
+
+The sign-off is signed by the signed-in QA Lead or Admin, never a typed name, with a SHA-256 of what was signed. Sign-in, sign-off, release status, deletions, script edits, draft dismissals, setting and user changes are written to the **Audit log**. A role change, deactivation or password reset signs that person out at once. Five wrong passwords lock an account for 15 minutes.
+
+Test-account passwords, API sign-in values and integration tokens are stored encrypted (AES-256-GCM with `SECRETS_KEY`) and never sent back to a page.
+
+Playwright scripts run as Node.js on this server, so each one is checked before it runs: it may import only `@playwright/test` and use `process` only to read one variable such as `process.env.QA_USER` (uploads pass a buffer to `setInputFiles` instead of writing a temp file); `require`, dynamic `import()`, `fs`, `path`, `os`, the rest of `process`, `globalThis`, `eval` and the `Function` constructor are refused. A script blocked this way shows "Blocked by policy" with the line; generate it again or fix it (`src/lib/scriptpolicy.ts`), and the run gets a clean environment without the app's secrets. This is a guard, not a sandbox: for untrusted scripts, run Playwright in a container.
 
 `npm run db:push` creates the tables. For versioned migrations use `npm run db:migrate` instead. `npm run db:studio` opens Prisma Studio to inspect data.
 
@@ -40,7 +59,7 @@ Stack: Next.js 15 (App Router, server actions), Prisma 6, PostgreSQL, Claude API
 | 9 Security Testing | Security Testing: the built-in checks and the OWASP ZAP baseline scan, every check listed with what fails and where | Feeds Gate 5: Done when nothing High or Medium is open |
 | 10 Defect logging | Bugs: template fields enforced, reproduce-by-human rule, duplicate check, push through the MCP connector or webhook | |
 | 11 Retest and regression | Bugs: Fixed, Reopened; reopen rate | |
-| 12 Sign-off | Sign-off page: twelve metrics, Gate 5, report text | Gate 5: computed; Go is refused when not met |
+| 12 Sign-off | Sign-off page: twelve metrics, Gate 5, report text | Gate 5: computed live; Go is refused when not met, including while any AC Check, API Test or UI Testing failure or bug draft is neither logged nor dismissed, and unless the latest security scan of the latest build has nothing High or Medium |
 | 13 Post-release | Sign-off page: escapes with the stage that missed them | |
 
 The workflow board on each release shows all 13 stages, the five gates and their reasons, and the headline numbers.
@@ -58,6 +77,20 @@ Each step shows its status in the release navigation, and the 13-stage board fol
 5. **Playwright Test.** Writes one spec per story from its step 2 test cases (split every 20 cases), checks that it parses, and stores it. Run the scripts here runs every stored spec with Playwright Test in a hidden Chrome on step 4's URL to test, signed in with step 4's test account (passed to the scripts as QA_USER and QA_PASSWORD), then records each result on its test case, with what happened and the screen at the end of the test as evidence, and counts the run towards automation stability. Run by user story works the way AC Check does: choose a story from the list, generate its scripts alone, run the whole story or one test case (Playwright is told to run only the test titled with that TC ID), and see each case with its expected result, Pass or Fail, what happened and its screenshot; failed cases become bug drafts that link to the screenshot, and a case that passes again clears its draft. Test titles start with the TC ID, so results posted to `/api/import/playwright` map back to the case (without screenshots, which only a run on this machine keeps). The scripts have not seen the running application, so lines marked `// VERIFY` need checking on the first run.
 8. **Security Testing.** Run security scan looks at the URL to test with free tools and lists every check with Pass, or its risk, where it was seen, what was found and how to fix it. The built-in checks open the site in a hidden Chrome, sign in with step 4's test account and visit the mapped pages (up to 15): HTTPS, the Strict-Transport-Security, Content-Security-Policy, X-Frame-Options or frame-ancestors, X-Content-Type-Options, Referrer-Policy, Permissions-Policy and Cache-Control headers, Server and X-Powered-By disclosure, CORS with credentials, the HttpOnly, Secure and SameSite flags of the cookies set after signing in, mixed content and forms posting over HTTP, password field autocomplete, whether `/.git/HEAD`, `/.git/config` or `/.env` are served, whether redirect-style parameters on the sign-in and home pages send a visitor off the site, and whether a marker typed into search boxes comes back in the page unescaped. The OWASP ZAP baseline scan, when Docker runs, spiders the site unauthenticated for two minutes and applies its passive rules (`zaproxy/zap-stable zap-baseline.py`, a local address reached as `host.docker.internal`); its alerts join the list with their risk, places and evidence, its passed rules are listed too, and its HTML report opens from the page. Nothing is attacked or saved. High and Medium findings become bug drafts, cleared by a later scan that no longer finds them; Gate 5 reads the stage as green when the latest scan has nothing High or Medium. Earlier scans stay listed and can be removed.
 9. **Bugs and reports.** Failed cases, failed triggers, failed API tests, user-story flows that differ and security findings become drafts. A person confirms a draft (reproducing it unless it is Low), which logs the bug and sends it through the chosen connection. Send report sends the pass and fail result of every case on the latest build through the MCP connector.
+
+## Running it for a team
+
+**Allowed test targets.** Runs, scans and API tests send traffic from this server, so an Admin lists the hosts it may test in Settings, *Allowed test targets* (`qa.example.com`, `qa.example.com:8443`, `*.staging.example.com`). The list is checked when the URL to test or the API base is saved and again when every run starts; with it empty, nothing can be tested. Cloud metadata and link-local addresses are always refused.
+
+**Single sign-on (Microsoft Entra ID or any OpenID Connect provider).** In Entra: App registrations, New registration, Web redirect URI `https://<this site>/login/oidc/callback`; add a client secret. Set `OIDC_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` and, usually, `OIDC_ALLOWED_DOMAINS=company.com`. The sign-in page then shows *Sign in with Microsoft*. A first sign-in creates a Viewer account (or `OIDC_DEFAULT_ROLE`, never Admin) that an Admin raises in Users; an account an Admin created ahead with the same email is linked instead. The flow is authorization code with PKCE; the ID token's signature, issuer, audience, expiry and nonce are checked; for Entra the verified sign-in name is used, never the editable `email` claim; and only your tenant's issuer is accepted. `OIDC_ONLY=true` hides the password form, which stays at `/login?password=1` for a break-glass Admin.
+
+**Runs.** A run shows in the release's side bar while it goes, with *Cancel run*; it stops at its next step (the next model call, progress update, or the running test is stopped) and keeps what it finished. Runs beat every 15 seconds, so a run on another server instance counts as running and one whose server died is marked failed after a minute.
+
+**Script sandbox.** With `SCRIPT_SANDBOX=docker`, Playwright scripts run in `mcr.microsoft.com/playwright:v<installed version>-noble` as an unprivileged user with every capability dropped, limits on memory and processes, and only the run folder and `node_modules` (read-only) mounted: no app files, `.env` or database credentials. A local URL to test is reached as `host.docker.internal`. Without Docker the run fails rather than run on the server. The container still has network access, so also change the database's default password. API test runs (which the app writes itself) stay on the server.
+
+**AI usage.** *AI usage* (QA Lead and Admin) shows every model request of the last 30 days by step, release and connection: calls, failures, time, tokens and cost when reported, and how many AI-written test cases a person has reviewed. Set `AI_REQUIRE_API_KEY=true` on a shared server so nothing runs on one person's Claude Code login (plugin skills, prototype pictures and browser runs need that login and are then off).
+
+**Retention.** Screenshots are kept in the database. `npm run retention` shows what old evidence would be freed; `npm run retention -- --apply` frees it: screenshots of runs older than 30 days (results and differences stay), Playwright screenshots on builds that are not a release's latest, ZAP reports beyond each release's newest 5 scans, run logs older than 90 days, AI usage older than a year. Uploaded files, results, bugs, sign-offs and the audit log are never touched. Options: `--evidence-days`, `--keep-scans`, `--job-days`, `--ai-days`. Evidence links in your tracker to a freed screenshot then show that it is gone.
 
 ## Connections per flow
 
@@ -85,7 +118,7 @@ Newman:
       -H "Content-Type: application/json" -H "X-Release: Sprint 24" -H "X-Build: 1.24.3" \
       -H "X-Import-Token: $IMPORT_TOKEN" --data-binary @newman.json
 
-Each import records an automation run (used for the stability metric). If `X-Build` is given and a test title contains a TC ID (for example `PAY-VR-203-004 submits a payment`), that case's execution on the build is marked Pass or Fail, executed by AI, and the case is flagged automated.
+The import token is required: until an Admin sets one of 16+ characters in Settings (or `IMPORT_TOKEN` in `.env`), both endpoints answer 503. Each import records an automation run (used for the stability metric). If `X-Build` is given and a test title contains a TC ID (for example `PAY-VR-203-004 submits a payment`), that case's execution on the build is marked Pass or Fail, executed by AI, and the case is flagged automated.
 
 ## Bug webhook
 
@@ -97,6 +130,7 @@ Edit `src/lib/workflow.ts` to change: P1 pass rate (95%), automation stability (
 
 ## Notes
 
-- No login is built in. Run it inside your network or put it behind your existing SSO or reverse-proxy auth.
+- Sign-in is built in (email and password, roles, audit log). Single sign-on (OIDC) is not yet; run it inside your network and behind HTTPS, and set `AUTH_COOKIE_SECURE=true` there.
+- `npm test` runs the unit tests for the gates, sessions, secrets and the script policy; `npm run typecheck` checks types. CI runs both (`.github/workflows/ci.yml`).
 - Nothing connects to any external tool automatically. Claude, the webhook and the CI imports are each off until you provide the key, URL or token.
 - The app was built and compiled in a sandbox without network access to Prisma's engine downloads, so `npm run build` was not executed end to end there. Run `npm install && npm run build` once locally; if a type error appears in a Prisma call, it will be a one-line fix and the file and line are printed.

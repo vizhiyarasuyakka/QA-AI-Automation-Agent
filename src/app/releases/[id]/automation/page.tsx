@@ -28,7 +28,7 @@ export default async function AutomationPage({ params, searchParams }: { params:
   // Every story with its cases, what the scripts found for each on the latest build, and which cases a stored script covers.
   const stories = await prisma.story.findMany({
     where: { releaseId: id }, orderBy: { storyId: "asc" },
-    select: { id: true, storyId: true, title: true, module: true, userStory: true, scripts: { orderBy: { part: "asc" }, select: { id: true, fileName: true, tcIds: true, code: true, status: true, error: true, engine: true, edited: true, generatedAt: true } }, testCases: { orderBy: { tcId: "asc" }, select: { id: true, tcId: true, title: true, priority: true, expected: true, executions: { where: { buildId: current?.id ?? "" }, select: { id: true, result: true, actual: true, executedAt: true, executedBy: true, evidenceUrl: true } } } } },
+    select: { id: true, storyId: true, title: true, module: true, userStory: true, scripts: { orderBy: { part: "asc" }, select: { id: true, fileName: true, tcIds: true, code: true, status: true, error: true, engine: true, edited: true, editedBy: true, generatedAt: true } }, testCases: { orderBy: { tcId: "asc" }, select: { id: true, tcId: true, title: true, priority: true, expected: true, executions: { where: { buildId: current?.id ?? "" }, select: { id: true, result: true, actual: true, executedAt: true, executedBy: true, evidenceUrl: true } } } } },
   });
   const rowsOf = (s: (typeof stories)[number]) => {
     const covered = new Set(s.scripts.flatMap((x) => x.tcIds.split(",").map((t) => t.trim())));
@@ -189,7 +189,7 @@ curl -X POST http://localhost:3100/api/import/playwright \\
                               </details>
                             </td>
                             <td>{s.tcIds.split(",").filter(Boolean).length}</td>
-                            <td><Badge tone={s.status === "Ready" ? "ok" : s.status === "Syntax error" ? "bad" : "warn"}>{s.status}</Badge>{s.edited && <div className="muted">edited</div>}{s.error && <div className="muted">{s.error}</div>}</td>
+                            <td><Badge tone={s.status === "Ready" ? "ok" : s.status === "Syntax error" || s.status === "Blocked by policy" ? "bad" : "warn"}>{s.status}</Badge>{s.edited && <div className="muted">edited{s.editedBy ? ` by ${s.editedBy}` : ""}</div>}{s.error && <div className="muted">{s.error}</div>}</td>
                             <td>{s.generatedAt.toLocaleString("en-IN", { dateStyle: "short", timeStyle: "short" })}<div className="muted">{s.engine}</div></td>
                             <td style={{ whiteSpace: "nowrap" }}>
                               <a className="btn small secondary" href={`/releases/${id}/automation/download?script=${s.id}`}>Download</a>{" "}

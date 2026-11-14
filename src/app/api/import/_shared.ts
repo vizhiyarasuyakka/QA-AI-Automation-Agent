@@ -1,10 +1,20 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { prisma } from "@/lib/prisma";
 import { getSetting } from "@/lib/webhook";
 
+/** Equal-time compare of the digests, so the token cannot be found character by character. */
+const sameToken = (a: string, b: string) => timingSafeEqual(createHash("sha256").update(a).digest(), createHash("sha256").update(b).digest());
+
+/**
+ * CI imports change pass rates and the gates, so they always need X-Import-Token. With no token set, imports are off:
+ * an open endpoint would let anyone on the network post "all passed".
+ */
 export async function authorize(req: Request): Promise<Response | null> {
   const expected = await getSetting("IMPORT_TOKEN");
-  if (expected && req.headers.get("x-import-token") !== expected) return Response.json({ error: "invalid X-Import-Token" }, { status: 401 });
+  if (expected.length < 16) return Response.json({ error: "CI imports are off until an Admin sets an import token of at least 16 characters in Settings." }, { status: 503 });
+  const given = req.headers.get("x-import-token") ?? "";
+  if (!given || !sameToken(given, expected)) return Response.json({ error: "invalid X-Import-Token" }, { status: 401 });
   return null;
 }
 

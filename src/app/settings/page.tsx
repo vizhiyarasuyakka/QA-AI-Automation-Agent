@@ -1,24 +1,42 @@
 import Link from "next/link";
-import { BUG_FIELDS, REPORT_FIELDS, getSetting } from "@/lib/webhook";
+import { requireRole } from "@/lib/auth";
+import { BUG_FIELDS, REPORT_FIELDS, getSetting, hasSetting } from "@/lib/webhook";
 import { claudeConnection } from "@/lib/claude";
 import { FLOW_LABELS, inventory, selectedEngine, type Flow } from "@/lib/engines";
 import type { McpTool } from "@/lib/mcp";
 import { Badge } from "@/components/Badge";
 import { EnginePicker } from "@/components/EnginePicker";
 import { Notice } from "@/components/Notice";
-import { connectMcp, recheckConnections, saveMcpTool, saveReportTool, saveSettings } from "./actions";
+import { connectMcp, recheckConnections, saveMcpTool, saveReportTool, saveSettings, saveTargets } from "./actions";
+import { prisma } from "@/lib/prisma";
+import { allowlist, hostAllowed } from "@/lib/targets";
 import { STAGES, STAGE_USES, THRESHOLDS } from "@/lib/workflow";
 
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ ok?: string; err?: string; info?: string }> }) {
   const sp = await searchParams;
-  const [url, token, importToken, conn, mcpUrl, mcpToken, mcpToolsJson, mcpTool, mcpArgs, reportTool, reportArgs, inv] = await Promise.all([
-    getSetting("BUG_WEBHOOK_URL"), getSetting("BUG_WEBHOOK_TOKEN"), getSetting("IMPORT_TOKEN"), claudeConnection(),
-    getSetting("BUG_MCP_URL"), getSetting("BUG_MCP_TOKEN"), getSetting("BUG_MCP_TOOLS"), getSetting("BUG_MCP_TOOL"), getSetting("BUG_MCP_ARGS"),
+  const me = await requireRole("Viewer");
+  const admin = me.role === "Admin";
+  // Secrets are only ever reported as set or not; their values never reach the page.
+  const [url, hasToken, hasImportToken, conn, mcpUrl, hasMcpToken, mcpToolsJson, mcpTool, mcpArgs, reportTool, reportArgs, inv] = await Promise.all([
+    getSetting("BUG_WEBHOOK_URL"), hasSetting("BUG_WEBHOOK_TOKEN"), hasSetting("IMPORT_TOKEN"), claudeConnection(),
+    getSetting("BUG_MCP_URL"), hasSetting("BUG_MCP_TOKEN"), getSetting("BUG_MCP_TOOLS"), getSetting("BUG_MCP_TOOL"), getSetting("BUG_MCP_ARGS"),
     getSetting("REPORT_MCP_TOOL"), getSetting("REPORT_MCP_ARGS"), inventory(),
   ]);
+  const secretField = (name: string, label: string, saved: boolean) => (
+    <label><span>{label} {saved ? <Badge tone="ok">Saved</Badge> : <Badge>Not set</Badge>}</span>
+      <input name={name} type="password" autoComplete="new-password" placeholder={saved ? "Saved. Type a new value to replace it." : ""} disabled={!admin} />
+      {saved && admin && <span className="row" style={{ gap: ".3rem", fontSize: 12 }}><input type="checkbox" name={`clear_${name}`} style={{ width: "auto" }} /> Remove it</span>}
+    </label>
+  );
   const mcpTools: McpTool[] = mcpToolsJson ? JSON.parse(mcpToolsJson) : [];
+  // Hosts releases point at today, so an Admin sees which runs the allowlist would stop.
+  const [targets, [buildUrls, apiUrls]] = await Promise.all([
+    allowlist(),
+    Promise.all([prisma.build.findMany({ select: { envUrl: true } }), prisma.apiTarget.findMany({ select: { baseUrl: true } })]),
+  ]);
+  const notAllowed = [...new Set([...buildUrls.map((b) => b.envUrl), ...apiUrls.map((t) => t.baseUrl)].filter(Boolean).filter((u) => !hostAllowed(u, targets)).map((u) => { try { return new URL(u).host; } catch { return u; } }))];
   const flows = Object.keys(FLOW_LABELS) as Flow[];
   const chosen = Object.fromEntries(await Promise.all(flows.map(async (f) => [f, await selectedEngine(f)] as const))) as Record<Flow, string>;
   const inUse = (id: string) => flows.filter((f) => chosen[f] === id);
@@ -115,10 +133,10 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
         <p className="muted">Used by <Link href="/releases">step 7</Link> to send bugs and the pass and fail report to your web application. It needs a URL and an optional token; a server that signs in through a browser cannot connect here.</p>
         <form action={connectMcp} className="stack">
           <div className="fields">
-            <label><span>MCP server URL</span><input name="BUG_MCP_URL" defaultValue={mcpUrl} placeholder="https://qa.yourcompany.com/mcp" /></label>
-            <label><span>Bearer token (optional)</span><input name="BUG_MCP_TOKEN" defaultValue={mcpToken} type="password" /></label>
+            <label><span>MCP server URL</span><input name="BUG_MCP_URL" defaultValue={mcpUrl} placeholder="https://qa.yourcompany.com/mcp" disabled={!admin} /></label>
+            {secretField("BUG_MCP_TOKEN", "Bearer token (optional)", hasMcpToken)}
           </div>
-          <div><button type="submit">Save and connect</button> {mcpTools.length > 0 && <Badge tone="ok">Connected, {mcpTools.length} tools</Badge>}</div>
+          <div><button type="submit" disabled={!admin}>Save and connect</button> {mcpTools.length > 0 && <Badge tone="ok">Connected, {mcpTools.length} tools</Badge>}</div>
         </form>
         {mcpTools.length > 0 && (
           <div className="grid-2" style={{ marginTop: "1rem" }}>
@@ -142,14 +160,26 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
         )}
       </div>
 
+      <h2 id="targets">Allowed test targets</h2>
+      <div className="card" style={{ marginBottom: "1rem" }}>
+        <p className="muted">Every run opens the URL to test or the API base from this server&apos;s network, so only the hosts listed here can be tested. One per line: <code>qa.example.com</code> (any port), <code>qa.example.com:8443</code>, or <code>*.staging.example.com</code>. Cloud metadata and link-local addresses are always refused. With the list empty, nothing can be tested.</p>
+        {notAllowed.length > 0 && <p className="notice warn">In use but not allowed, so their runs will fail: {notAllowed.map((h) => <code key={h} style={{ marginRight: ".4rem" }}>{h}</code>)}</p>}
+        <form action={saveTargets} className="stack">
+          <textarea name="TARGET_ALLOWLIST" defaultValue={targets.join("\n")} className="mono" style={{ minHeight: "6rem" }} disabled={!admin} placeholder={"qa.example.com\n*.staging.example.com\nlocalhost:3000"} />
+          <div><button type="submit" disabled={!admin}>Save allowed targets</button>{!admin && <span className="muted"> Only an Admin can change this.</span>}</div>
+        </form>
+      </div>
+
       <div className="grid-2">
         <div className="card">
           <h3>Other integrations</h3>
           <form action={saveSettings} className="stack">
-            <label><span>Bug webhook URL (accepts JSON POST; used when Bug logging is set to Webhook)</span><input name="BUG_WEBHOOK_URL" defaultValue={url} placeholder="https://qa.yourcompany.com/api/bugs" /></label>
-            <label><span>Bug webhook bearer token (optional)</span><input name="BUG_WEBHOOK_TOKEN" defaultValue={token} type="password" /></label>
-            <label><span>Import token for /api/import/* (optional, sent as X-Import-Token)</span><input name="IMPORT_TOKEN" defaultValue={importToken} type="password" /></label>
-            <div><button type="submit">Save</button></div>
+            {!admin && <p className="notice info" style={{ margin: 0 }}>Only an Admin can change integrations.</p>}
+            <label><span>Bug webhook URL (accepts JSON POST; used when Bug logging is set to Webhook)</span><input name="BUG_WEBHOOK_URL" defaultValue={url} placeholder="https://qa.yourcompany.com/api/bugs" disabled={!admin} /></label>
+            {secretField("BUG_WEBHOOK_TOKEN", "Bug webhook bearer token (optional)", hasToken)}
+            {secretField("IMPORT_TOKEN", "Import token for /api/import/* (required for CI imports, 16+ characters, sent as X-Import-Token)", hasImportToken)}
+            {!hasImportToken && <p className="muted" style={{ margin: 0 }}>CI imports are off until this is set.</p>}
+            <div><button type="submit" disabled={!admin}>Save</button></div>
           </form>
         </div>
         <div className="card">

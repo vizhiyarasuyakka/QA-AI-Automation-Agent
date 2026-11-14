@@ -1,5 +1,6 @@
 "use server";
 
+import { audit, requireRole } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { nextBugId } from "@/lib/workflow";
 import { logCandidate, draftsFromFailedCases, sendReport } from "@/lib/bugflow";
@@ -48,8 +49,11 @@ export async function logDraft(formData: FormData) {
   redirect(`/releases/${releaseId}/bugs?${res.error ? "err" : "ok"}=${encodeURIComponent(res.error ?? res.message ?? "")}`);
 }
 
+/** Dismissing clears a failure from Gate 5, so it is a decision a person owns and it is audited. */
 export async function dismissDraft(formData: FormData) {
-  await prisma.bugCandidate.update({ where: { id: s(formData, "id") }, data: { status: "Dismissed" } });
+  const user = await requireRole("QA Engineer", "dismiss bug drafts");
+  const draft = await prisma.bugCandidate.update({ where: { id: s(formData, "id") }, data: { status: "Dismissed" } });
+  await audit(user, "bug.draft_dismiss", { releaseId: draft.releaseId, target: draft.title, detail: `${draft.refKey}, ${draft.severity}` });
   redirect(`/releases/${s(formData, "releaseId")}/bugs?ok=Draft dismissed`);
 }
 
@@ -60,6 +64,7 @@ export async function sendTestReport(formData: FormData) {
 }
 
 export async function updateBugStatus(formData: FormData) {
+  const user = await requireRole("QA Engineer", "change bug status");
   const id = s(formData, "id"); const releaseId = s(formData, "releaseId"); const status = s(formData, "status");
   const bug = await prisma.bug.findUnique({ where: { id } });
   if (!bug) redirect(`/releases/${releaseId}/bugs`);
@@ -69,6 +74,7 @@ export async function updateBugStatus(formData: FormData) {
   if (status === "Reopened") { if (bug.status !== "Reopened") data.reopenCount = bug.reopenCount + 1; data.fixedAt = null; data.closedAt = null; }
   if (status === "Open" || status === "In progress") { data.fixedAt = null; data.closedAt = null; }
   await prisma.bug.update({ where: { id }, data });
+  if (bug.status !== status) await audit(user, "bug.status", { releaseId, target: bug.bugId, detail: `${bug.status} → ${status}` });
   revalidatePath(`/releases/${releaseId}/bugs`);
   redirect(`/releases/${releaseId}/bugs?ok=${encodeURIComponent(`${bug.bugId} set to ${status}`)}`);
 }
@@ -81,7 +87,9 @@ export async function resendWebhook(formData: FormData) {
 }
 
 export async function deleteBug(formData: FormData) {
+  const user = await requireRole("QA Lead", "delete bugs");
   const id = s(formData, "id"); const releaseId = s(formData, "releaseId");
-  await prisma.bug.delete({ where: { id } });
+  const bug = await prisma.bug.delete({ where: { id } });
+  await audit(user, "bug.delete", { releaseId, target: bug.bugId, detail: `${bug.severity}: ${bug.title}` });
   redirect(`/releases/${releaseId}/bugs?ok=Bug deleted`);
 }

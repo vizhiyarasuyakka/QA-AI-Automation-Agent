@@ -1,3 +1,4 @@
+import { cache } from "react";
 import { coverageGaps } from "./coverage";
 import { runningJob } from "./jobs";
 import { prisma } from "./prisma";
@@ -32,7 +33,10 @@ export async function filesChangedSinceRead(releaseId: string) {
   return (await prisma.document.count({ where: { releaseId, docType: "User stories", uploadedAt: { gte: last.startedAt } } })) > 0;
 }
 
-export async function flowStates(releaseId: string) {
+/** Shared within one page render: the release nav, the page and syncStages each ask for it. */
+export const flowStates = cache((releaseId: string) => flowStatesNow(releaseId));
+
+async function flowStatesNow(releaseId: string) {
   const [files, running, stories, scripts, builds, bugs, triggers, drafts, protos, storyFiles] = await Promise.all([
     filesState(releaseId),
     runningJob(releaseId),
@@ -70,6 +74,7 @@ export async function flowStates(releaseId: string) {
     : running?.kind === "pw-run" ? { status: "Running", tone: "accent", detail: "Running the Playwright scripts." }
     : !scripts.length ? { status: "Not started", tone: undefined, detail: "No scripts yet." }
     : scripts.some((s) => s.status === "Syntax error") ? { status: "Errors", tone: "bad", detail: "A stored script has a syntax error." }
+    : scripts.some((s) => s.status === "Blocked by policy") ? { status: "Errors", tone: "bad", detail: "A stored script reaches past the browser and will not run. See its error." }
     : withCases.some((s) => !scripted.has(s.id)) ? { status: "Partial", tone: "warn", detail: `${scripted.size} of ${withCases.length} stories have scripts.` }
     : { status: "Stored", tone: "ok", detail: `${scripts.length} script files stored.` };
 
@@ -156,7 +161,13 @@ export async function syncStages(releaseId: string) {
     prisma.signoff.findUnique({ where: { releaseId }, select: { recommendation: true, buildNo: true } }),
   ]);
   const gates = await evaluateGates(releaseId, m);
-  const set = (stageNo: number, status: string, note: string) => prisma.stageStatus.upsert({ where: { releaseId_stageNo: { releaseId, stageNo } }, update: { status, note }, create: { releaseId, stageNo, status, note } });
+  // Opening a page should not write: only a stage whose status or note actually changed is saved.
+  const rows = new Map((await prisma.stageStatus.findMany({ where: { releaseId }, select: { stageNo: true, status: true, note: true } })).map((r) => [r.stageNo, r]));
+  const set = async (stageNo: number, status: string, note: string) => {
+    const was = rows.get(stageNo);
+    if (was && was.status === status && was.note === note) return;
+    await prisma.stageStatus.upsert({ where: { releaseId_stageNo: { releaseId, stageNo } }, update: { status, note }, create: { releaseId, stageNo, status, note } });
+  };
   await set(1, f.files.complete ? "Done" : f.files.status === "Not started" ? "Pending" : "In progress", f.files.detail);
   await set(2, f.testcases.status === "Waiting" || f.testcases.status === "Ready" ? "Pending" : f.testcases.status === "Gaps" || f.testcases.status === "Running" ? "In progress" : "Done", f.testcases.detail);
   await set(3, f.review.status === "Waiting" ? "Pending" : f.review.status === "Complete" ? "Done" : "In progress", f.review.detail);

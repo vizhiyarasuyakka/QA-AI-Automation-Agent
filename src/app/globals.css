@@ -204,3 +204,11 @@ td.mono { white-space: nowrap; }
 .spinner.small { width: .85rem; height: .85rem; vertical-align: -2px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+
+/* Sign-in and the signed-in user in the top bar */
+.login-wrap { min-height: calc(100vh - var(--bar) - 3rem); display: grid; place-items: center; }
+.login-card { width: 100%; max-width: 26rem; }
+.topbar .who { margin-left: auto; display: flex; align-items: center; gap: .6rem; font-size: 13px; color: var(--muted); }
+.topbar .who strong { color: var(--fg); font-weight: 500; }
+.rail-job { margin: 0 .45rem .5rem; padding: .5rem .6rem; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--bg); display: flex; flex-direction: column; gap: .3rem; font-size: 13px; }
+.rail-job .muted { font-size: 12px; overflow-wrap: anywhere; }

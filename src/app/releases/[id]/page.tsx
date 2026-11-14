@@ -75,7 +75,7 @@ export default async function ReleaseBoard({ params, searchParams }: { params: P
               {s.gate && <div className="gate">{s.gate} {gate && <Badge tone={gate.met ? "ok" : "bad"}>{gate.met ? "met" : "not met"}</Badge>}</div>}
               {row?.note && <div className="muted" style={{ fontSize: ".8rem" }}>{row.note}</div>}
               <div className="tools">{s.tools}</div>
-              <details>
+              {s.no === 13 && <details>
                 <summary className="muted" style={{ fontSize: ".78rem" }}>Update</summary>
                 <form action={setStageStatus} className="stack" style={{ marginTop: ".4rem" }}>
                   <input type="hidden" name="releaseId" value={id} />
@@ -84,12 +84,12 @@ export default async function ReleaseBoard({ params, searchParams }: { params: P
                   <input name="note" defaultValue={row?.note ?? ""} placeholder="Note (what was done, what blocked)" />
                   <button className="small" type="submit">Save</button>
                 </form>
-              </details>
+              </details>}
             </div>
           );
         })}
       </div>
-      <p className="muted" style={{ marginTop: "1rem" }}>A stage with a gate cannot be marked Done while its gate reads "not met". Stage 9 (Security Testing) Done, a scan with nothing High or Medium, is what Gate 5 reads as security green.</p>
+      <p className="muted" style={{ marginTop: "1rem" }}>Stages 1 to 12 follow their pages; only stage 13 is set by hand. Gate 5 reads security from the latest scan itself (finished, on the latest build, nothing High or Medium), and every failure from AC Check, API Test and UI Testing must be logged as a bug or dismissed before Go.</p>
     </>
   );
 }

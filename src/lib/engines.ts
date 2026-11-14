@@ -2,7 +2,9 @@ import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { recordAiCall } from "./aiusage";
 import { askClaudeJson, claudeConnection, cliEnv, findClaudeCli, TruncatedError, type JsonRequest } from "./claude";
+import { throwIfCancelled } from "./jobscope";
 import { FLOW_LABELS, fitOf, mcpFit, type Flow } from "./skillmap";
 import { getSetting, setSetting } from "./webhook";
 
@@ -180,10 +182,13 @@ export async function askEngine<T>(flow: Flow, req: JsonRequest): Promise<T> {
 }
 
 async function askCodexJson<T>(req: JsonRequest): Promise<T> {
+  throwIfCancelled();
   const dir = mkdtempSync(path.join(os.tmpdir(), "qa-codex-"));
   const schemaFile = path.join(dir, "schema.json");
   const outFile = path.join(dir, "out.json");
   writeFileSync(schemaFile, JSON.stringify(req.schema));
+  const started = Date.now();
+  const inputChars = req.system.length + req.context.length + req.ask.length;
   try {
     await new Promise<void>((resolve, reject) => {
       const child = spawn("codex", ["exec", "--skip-git-repo-check", "--sandbox", "read-only", "--output-schema", `"${schemaFile}"`, "--output-last-message", `"${outFile}"`, "-"], { cwd: dir, stdio: ["pipe", "ignore", "pipe"], windowsHide: true, shell: true, timeout: 15 * 60 * 1000 });
@@ -195,10 +200,17 @@ async function askCodexJson<T>(req: JsonRequest): Promise<T> {
       child.stdin.end(`${req.system}\n\n${req.context}\n\n${req.ask}`);
     });
     try {
-      return JSON.parse(readFileSync(outFile, "utf8")) as T;
+      const text = readFileSync(outFile, "utf8");
+      const parsed = JSON.parse(text) as T;
+      await recordAiCall({ via: "codex", model: "codex", ok: true, ms: Date.now() - started, inputChars, outputChars: text.length });
+      return parsed;
     } catch {
+      await recordAiCall({ via: "codex", model: "codex", ok: false, error: "output was not complete JSON", ms: Date.now() - started, inputChars });
       throw new TruncatedError("Codex output was not complete JSON.");
     }
+  } catch (e) {
+    if (!(e instanceof TruncatedError)) await recordAiCall({ via: "codex", model: "codex", ok: false, error: e instanceof Error ? e.message : String(e), ms: Date.now() - started, inputChars });
+    throw e;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

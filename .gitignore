@@ -3,3 +3,6 @@ node_modules
 .next
 .env
 *.log
+*.tsbuildinfo
+test-results
+.playwright-mcp

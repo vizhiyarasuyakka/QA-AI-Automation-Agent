@@ -9,6 +9,12 @@
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev --name init",
     "db:studio": "prisma studio",
+    "keys": "node scripts/keys.mjs",
+    "user:create": "node --env-file-if-exists=.env scripts/create-user.mjs",
+    "secrets:encrypt": "node --env-file-if-exists=.env scripts/encrypt-secrets.mjs",
+    "retention": "node --env-file-if-exists=.env scripts/retention.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "postinstall": "prisma generate"
   },
   "dependencies": {
@@ -33,6 +39,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "prisma": "^6.19.3",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^3.2.4"
   }
 }

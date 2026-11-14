@@ -1,13 +1,21 @@
 import { mcpCallTool, renderArgs } from "./mcp";
 import { prisma } from "./prisma";
+import { decryptSecret, encryptSecret, SECRET_SETTINGS } from "./secrets";
 
+/** A saved row wins over .env. Token rows are stored encrypted and read back plain. */
 export async function getSetting(key: string, fallback = ""): Promise<string> {
   const row = await prisma.setting.findUnique({ where: { key } });
-  return row?.value ?? process.env[key] ?? fallback;
+  return row ? decryptSecret(row.value) : process.env[key] ?? fallback;
 }
 
 export async function setSetting(key: string, value: string) {
-  await prisma.setting.upsert({ where: { key }, update: { value }, create: { key, value } });
+  const stored = SECRET_SETTINGS.has(key) ? encryptSecret(value) : value;
+  await prisma.setting.upsert({ where: { key }, update: { value: stored }, create: { key, value: stored } });
+}
+
+/** Whether a secret is set, without reading its value into a page. */
+export async function hasSetting(key: string): Promise<boolean> {
+  return !!(await getSetting(key));
 }
 
 export const REPORT_FIELDS = ["release", "build", "total", "passed", "failed", "blocked", "notRun", "passRate", "summary", "failedCases", "results", "sentAt"];
