@@ -1,4 +1,4 @@
-import { pictureResponse } from "@/lib/evidence";
+import { cachedImage, pictureResponse } from "@/lib/evidence";
 import { prisma } from "@/lib/prisma";
 import type { ScreenDiff } from "@/lib/screencompare";
 
@@ -8,7 +8,9 @@ import type { ScreenDiff } from "@/lib/screencompare";
  */
 export async function GET(req: Request, { params }: { params: Promise<{ id: string; fid: string }> }) {
   const { id, fid } = await params;
-  const f = await prisma.uiFlow.findUnique({ where: { id: fid }, select: { releaseId: true, protoShot: true, appShot: true, diffs: true } });
-  if (!f || f.releaseId !== id) return new Response("No screenshot", { status: 404 });
-  return pictureResponse(new URL(req.url).searchParams, { prototype: f.protoShot, build: f.appShot }, JSON.parse(f.diffs) as ScreenDiff[]);
+  return cachedImage(req, async () => {
+    const f = await prisma.uiFlow.findUnique({ where: { id: fid }, select: { releaseId: true, protoShot: true, appShot: true, diffs: true } });
+    if (!f || f.releaseId !== id) return new Response("No screenshot", { status: 404 });
+    return pictureResponse(new URL(req.url).searchParams, { prototype: f.protoShot, build: f.appShot }, JSON.parse(f.diffs) as ScreenDiff[]);
+  });
 }

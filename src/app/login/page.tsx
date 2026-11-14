@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { currentUser } from "@/lib/auth";
-import { oidcConfig } from "@/lib/oidc";
+import { oidcConfig, safeNext } from "@/lib/oidc";
 import { prisma } from "@/lib/prisma";
 import { signIn } from "./actions";
 
@@ -8,7 +8,8 @@ export const dynamic = "force-dynamic";
 
 export default async function LoginPage({ searchParams }: { searchParams: Promise<{ err?: string; next?: string; ok?: string; password?: string }> }) {
   const sp = await searchParams;
-  if (await currentUser()) redirect("/releases");
+  // Already signed in: go where the link pointed, not always to the release list.
+  if (await currentUser()) redirect(safeNext(sp.next ?? ""));
   const users = await prisma.user.count();
   const sso = oidcConfig();
   // With single sign-on only, the password form stays reachable at /login?password=1 for a break-glass Admin.

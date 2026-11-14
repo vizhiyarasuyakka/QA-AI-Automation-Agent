@@ -14,6 +14,7 @@ export const config = {
 
 const PUBLIC = [/^\/login(\/|$)/, /^\/logout$/, /^\/api\/import\//];
 const READ = new Set(["GET", "HEAD", "OPTIONS"]);
+const PICTURES = /^\/releases\/[^/]+\/(ui-testing\/(match|flow|story|check)\/[^/]+|automation\/evidence\/[^/]+)$/;
 
 const cache = ((globalThis as unknown as { __qaMwUsers?: Map<string, { at: number; ok: boolean; role: string }> }).__qaMwUsers ??= new Map());
 const CACHE_MS = 5000;
@@ -53,8 +54,10 @@ export async function middleware(req: NextRequest) {
   }
 
   const res = NextResponse.next();
-  // Evidence, reports and pages show test data; nothing signed-in belongs in a shared cache.
-  res.headers.set("Cache-Control", "private, no-store");
+  // Pages, reports and exports show test data, so nothing signed-in goes to a shared cache. Evidence pictures set
+  // their own: versioned ones are kept privately by the browser (src/lib/evidence.ts), so a page of screenshots
+  // opens at once the second time.
+  if (!PICTURES.test(pathname)) res.headers.set("Cache-Control", "private, no-store");
   res.headers.set("X-Frame-Options", "SAMEORIGIN");
   res.headers.set("X-Content-Type-Options", "nosniff");
   res.headers.set("Referrer-Policy", "same-origin");

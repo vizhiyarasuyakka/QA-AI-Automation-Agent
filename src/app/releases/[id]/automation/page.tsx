@@ -7,6 +7,8 @@ import { Badge, resultTone } from "@/components/Badge";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { EnginePicker } from "@/components/EnginePicker";
 import { AutoRefresh } from "@/components/AutoRefresh";
+import { Picture } from "@/components/Picture";
+
 import { flowStates } from "@/lib/flows";
 import { runningJob, runProblems } from "@/lib/jobs";
 import { deleteScript, runScripts, saveScript, triggerScripts } from "./actions";
@@ -163,7 +165,7 @@ curl -X POST http://localhost:3100/api/import/playwright \\
                           <td className="muted" style={{ fontSize: 13, minWidth: 180 }}>{r.expected}</td>
                           <td><Badge tone={resultTone(r.run?.result ?? "Not run")}>{r.run?.result ?? "Not run"}</Badge>{r.run && r.run.result !== "Not run" && <div className="muted" style={{ fontSize: 11 }}>{r.run.executedBy === "AI" ? "Playwright" : "By hand"}, {r.run.executedAt.toLocaleString("en-IN", { dateStyle: "short", timeStyle: "short" })}</div>}</td>
                           <td style={{ fontSize: 13, minWidth: 200, overflowWrap: "anywhere" }}>{r.run?.actual}</td>
-                          <td>{r.run?.evidenceUrl ? <a href={r.run.evidenceUrl} target="_blank" rel="noreferrer">{/* eslint-disable-next-line @next/next/no-img-element */}<img src={r.run.evidenceUrl} alt={`Screen at the end of ${r.tcId}`} loading="lazy" style={{ width: 150, display: "block", border: "1px solid var(--line)" }} /></a> : <span className="muted">None yet</span>}</td>
+                          <td>{r.run?.evidenceUrl ? <Picture small href={r.run.evidenceUrl} alt={`Screen at the end of ${r.tcId}`} /> : <span className="muted">None yet</span>}</td>
                         </tr>
                       ))}
                       {!chosenRows.length && <tr><td colSpan={5} className="muted">No test cases for this story yet.</td></tr>}

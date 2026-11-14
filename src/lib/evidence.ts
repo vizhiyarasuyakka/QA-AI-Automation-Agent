@@ -65,11 +65,82 @@ export async function evidenceCrop(shot: Uint8Array, diffs: ScreenDiff[], index:
   if (x1 >= width || y1 >= height || x2 <= 0 || y2 <= 0) return null;
   const w = Math.min(width, Math.max(MIN_CROP.w, x2 - x1 + PAD * 2)), h = Math.min(height, Math.max(MIN_CROP.h, y2 - y1 + PAD * 2));
   const left = Math.round(Math.max(0, Math.min(width - w, (x1 + x2 - w) / 2))), top = Math.round(Math.max(0, Math.min(height - h, (y1 + y2 - h) / 2)));
-  const area = await sharp(shot).extract({ left, top, width: w, height: h }).png().toBuffer();
-  return new Uint8Array(await sharp(area).composite([{ input: drawn(w, h, marks, left, top) }]).png().toBuffer());
+  // One pass (sharp composites after the extract) and WebP: a page can hold thousands of these close-ups, and
+  // WebP is several times smaller than PNG and quicker to make. The full evidence sheet stays PNG.
+  return new Uint8Array(await sharp(shot).extract({ left, top, width: w, height: h }).composite([{ input: drawn(w, h, marks, left, top) }]).webp({ quality: 88, effort: 2 }).toBuffer());
 }
 
-const png = (bytes: Uint8Array) => new Response(new Uint8Array(bytes), { headers: { "Content-Type": "image/png", "Cache-Control": "no-store" } });
+const png = (bytes: Uint8Array) => new Response(new Uint8Array(bytes), { headers: { "Content-Type": "image/png", "Cache-Control": "private, no-cache" } });
+
+/* ---------- picture cache ---------- */
+
+/** Pages link pictures with ?t=<time of the run>, so a URL always means the same picture: safe to keep. */
+const VERSIONED = "private, max-age=31536000, immutable";
+const MAX_CACHE_BYTES = 128 * 1024 * 1024;
+type Cached = { bytes: Uint8Array<ArrayBuffer>; type: string };
+const pictures = ((globalThis as unknown as { __qaPictures?: { map: Map<string, Cached>; bytes: number } }).__qaPictures ??= { map: new Map(), bytes: 0 });
+
+function remember(key: string, value: Cached) {
+  if (value.bytes.length > MAX_CACHE_BYTES / 8) return;
+  pictures.map.set(key, value);
+  pictures.bytes += value.bytes.length;
+  // Oldest first out: a Map keeps insertion order, and a hit is re-inserted at the end.
+  for (const [k, v] of pictures.map) {
+    if (pictures.bytes <= MAX_CACHE_BYTES) break;
+    pictures.map.delete(k);
+    pictures.bytes -= v.bytes.length;
+  }
+}
+
+/**
+ * Wraps a picture route. A page of results can link thousands of close-ups of the same few screenshots; with a
+ * version in the URL, each is cut once, kept here (up to 128 MB, least recently used out) and kept by the browser,
+ * so scrolling and opening the page again need no database read or image work. The route's own access check runs
+ * before anything is stored, and the key is the full path, so a picture is only ever served for the path it was cut for.
+ */
+export async function cachedImage(req: Request, produce: () => Promise<Response>): Promise<Response> {
+  const url = new URL(req.url);
+  if (!url.searchParams.has("t")) return produce();
+  const key = pictureKey(url.pathname, url.searchParams.toString());
+  const send = (c: Cached) => new Response(c.bytes, { headers: { "Content-Type": c.type, "Cache-Control": VERSIONED } });
+  const hit = cachedPicture(key) ?? (await inflight.get(key));
+  if (hit) return send(hit);
+  const res = await produce();
+  if (!res.ok) return res;
+  const made: Cached = { type: res.headers.get("Content-Type") ?? "image/png", bytes: new Uint8Array(await res.arrayBuffer()) };
+  remember(key, made);
+  return send(made);
+}
+
+/* Used by the pre-render in src/lib/prerender.ts, which cuts a page's close-ups before they are asked for. */
+
+export const pictureKey = (pathname: string, query: string) => `${pathname}?${query}`;
+
+export function cachedPicture(key: string): Cached | null {
+  const hit = pictures.map.get(key);
+  if (!hit) return null;
+  pictures.map.delete(key);
+  pictures.map.set(key, hit);
+  return hit;
+}
+
+/** A picture being cut right now: a request for it waits for that cut instead of cutting it a second time. */
+const inflight = ((globalThis as unknown as { __qaPictureInflight?: Map<string, Promise<Cached | null>> }).__qaPictureInflight ??= new Map());
+
+export async function prepareCloseUp(key: string, shot: Uint8Array, diffs: ScreenDiff[], index: number, side: Side): Promise<void> {
+  if (pictures.map.has(key) || inflight.has(key)) return;
+  const job = evidenceCrop(shot, diffs, index, side).then((bytes) => (bytes ? { bytes, type: "image/webp" } : null));
+  inflight.set(key, job);
+  try {
+    const made = await job;
+    if (made) remember(key, made);
+  } finally {
+    inflight.delete(key);
+  }
+}
+
+/** True while the cache has room for more pre-cut pictures without pushing out ones already cut. */
+export const pictureRoom = () => pictures.bytes < MAX_CACHE_BYTES * 0.75;
 const none = (why = "No screenshot") => new Response(why, { status: 404 });
 
 /**
@@ -84,7 +155,7 @@ export async function pictureResponse(query: URLSearchParams, pictures: { protot
   if (!bytes) return none();
   if (n === null || view === "diff") return png(bytes);
   const crop = await evidenceCrop(bytes, diffs, Number(n), view === "prototype" ? "prototype" : "build");
-  return crop ? png(crop) : none("This difference has no place on this screenshot");
+  return crop ? new Response(crop, { headers: { "Content-Type": "image/webp", "Cache-Control": "private, no-cache" } }) : none("This difference has no place on this screenshot");
 }
 
 /**

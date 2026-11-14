@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { after } from "next/server";
+import { prerenderUiTesting } from "@/lib/prerender";
 import { prisma } from "@/lib/prisma";
 import { ReleaseNav } from "@/components/ReleaseNav";
 import { Notice } from "@/components/Notice";
@@ -7,6 +9,7 @@ import { Badge, resultTone } from "@/components/Badge";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { EnginePicker } from "@/components/EnginePicker";
 import { JobPanel } from "@/components/JobPanel";
+import { Picture } from "@/components/Picture";
 import { flowStates } from "@/lib/flows";
 import { runningJob } from "@/lib/jobs";
 import type { ScreenDiff } from "@/lib/uitesting";
@@ -20,15 +23,6 @@ export const dynamic = "force-dynamic";
 const matchTone = (r: string) => (r === "Match" ? "ok" : r === "Mismatch" ? "bad" : r === "Blocked" ? "warn" : undefined);
 const showsAsPicture = (mime: string) => mime.startsWith("image/") && mime !== "image/svg+xml";
 
-/** A screenshot that opens at full size in a new tab, loaded when scrolled to. A small one is a close-up in a table. */
-function Picture({ href, alt, small = false }: { href: string; alt: string; small?: boolean }) {
-  return (
-    <a href={href} target="_blank" rel="noreferrer">
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={href} alt={alt} loading="lazy" style={{ width: small ? 150 : "100%", display: "block", border: "1px solid var(--line)" }} />
-    </a>
-  );
-}
 
 /**
  * A comparison's numbered differences: which fields one side lacks, a link to the evidence picture, and each difference
@@ -102,6 +96,8 @@ export default async function UiTestingPage({ params, searchParams }: { params: 
   const { id } = await params; const sp = await searchParams;
   const release = await prisma.release.findUnique({ where: { id } });
   if (!release) notFound();
+  // Once this page is sent, cut its close-ups ahead of the browser, so scrolling finds them ready.
+  after(() => prerenderUiTesting(id).catch(() => {}));
   const running = await runningJob(id);
   const [states, protos, triggers, build, job, shotRows] = await Promise.all([
     flowStates(id),

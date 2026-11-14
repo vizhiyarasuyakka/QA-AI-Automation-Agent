@@ -6,6 +6,7 @@
     "dev": "next dev -p 3100",
     "build": "prisma generate && next build",
     "start": "next start -p 3100",
+    "prod": "next build && next start -p 3100",
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev --name init",
     "db:studio": "prisma studio",
